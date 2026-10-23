@@ -49,7 +49,9 @@
 // eigensolve and records the difference (for checks, not timing);
 // SDPB_STEP_LENGTH_LOG=<path> appends one line per call;
 // SDPB_STEP_LENGTH_INJECT=nonfinite|lapack|gate|cholesky forces each
-// fallback path.  Counters are printed to stderr at exit.
+// fallback path.  SDPB_STEP_LENGTH_CONGRUENCE=twosided replaces the two Trsm
+// of the congruence by El::TwoSidedTrsm (lower triangle only), in either
+// mode.  Counters are printed to stderr at exit.
 
 // A := L^{-1} A L^{-T}
 void lower_triangular_inverse_congruence(const Block_Diagonal_Matrix &L,
@@ -205,13 +207,37 @@ El::BigFloat step_length(const Block_Diagonal_Matrix &MCholesky,
     = env_string("SDPB_STEP_LENGTH_TOL").empty()
         ? 1e-8
         : std::atof(env_string("SDPB_STEP_LENGTH_TOL").c_str());
+  static const std::string congruence
+    = env_string("SDPB_STEP_LENGTH_CONGRUENCE");
   ++stats.calls;
 
   // MInvDM = L^{-1} dM L^{-T}, where M = L L^T
   Block_Diagonal_Matrix MInvDM(dM);
   {
     Scoped_Timer congruence_timer(timers, "congruence");
-    lower_triangular_inverse_congruence(MCholesky, MInvDM);
+    if(congruence.empty() || congruence == "trsm")
+      lower_triangular_inverse_congruence(MCholesky, MInvDM);
+    else if(congruence == "twosided")
+      {
+        // Symmetric two-sided solve (LAPACK sygst-like), about half the
+        // flops of two Trsm.  Only the LOWER triangle of the result is
+        // computed; every consumer below (HermitianEig LOWER, dsyevr 'L',
+        // Cholesky LOWER) reads only that triangle.
+        for(size_t b = 0; b < MInvDM.blocks.size(); ++b)
+          {
+            if(MInvDM.blocks[b].Grid().Size() == 1)
+              El::TwoSidedTrsm(El::UpperOrLowerNS::LOWER,
+                               El::UnitOrNonUnit::NON_UNIT,
+                               MInvDM.blocks[b].Matrix(),
+                               MCholesky.blocks[b].LockedMatrix());
+            else
+              El::TwoSidedTrsm(El::UpperOrLowerNS::LOWER,
+                               El::UnitOrNonUnit::NON_UNIT, MInvDM.blocks[b],
+                               MCholesky.blocks[b]);
+          }
+      }
+    else
+      RUNTIME_ERROR("Unknown SDPB_STEP_LENGTH_CONGRUENCE: ", congruence);
   }
   if(mode.empty() || mode == "reference")
     {
