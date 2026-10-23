@@ -98,6 +98,23 @@ namespace
     return v ? std::string(v) : std::string();
   }
 
+  // Subtract in the unsigned domain before narrowing. The ordered difference
+  // is representable in unsigned long even across LONG_MIN/LONG_MAX.
+  int clamped_exponent_difference(long a, long b)
+  {
+    if(a >= b)
+      return int(std::min(static_cast<unsigned long>(a)
+                            - static_cast<unsigned long>(b), 2000UL));
+    return -int(std::min(static_cast<unsigned long>(b)
+                          - static_cast<unsigned long>(a), 2000UL));
+  }
+
+  unsigned long exponent_magnitude(long e)
+  {
+    return e >= 0 ? static_cast<unsigned long>(e)
+                  : 0UL - static_cast<unsigned long>(e);
+  }
+
   enum class Block_Result
   {
     ok,
@@ -116,7 +133,8 @@ namespace
   {
     const int n = block.Height();
     // mpf_get_d_2exp gives d in [0.5,1) and an exact exponent, so no entry
-    // can overflow when cast, whatever the BigFloat exponent range.
+    // is converted without constructing a double at its original exponent.
+    // Exponent differences must also be clamped before signed arithmetic.
     std::vector<double> a(size_t(n) * n, 0.0);
     std::vector<long> exps(size_t(n) * n, 0);
     long max_exp = std::numeric_limits<long>::min();
@@ -140,7 +158,7 @@ namespace
         {
           const size_t k = i + size_t(j) * n;
           // Entries more than 2^-2000 below the largest flush to zero.
-          a[k] = std::ldexp(a[k], int(std::max(exps[k] - max_exp, -2000L)));
+          a[k] = std::ldexp(a[k], clamped_exponent_difference(exps[k], max_exp));
           frob2 += (i == j ? 1.0 : 2.0) * a[k] * a[k];
         }
     if(inject == "nonfinite" && n > 0)
@@ -175,7 +193,7 @@ namespace
     const double u = std::numeric_limits<double>::epsilon() / 2;
     const double err = 8.0 * nn * u * std::sqrt(frob2);
     const double gamma_scaled
-      = std::ldexp(gamma, int(std::max(std::min(-max_exp, 2000L), -2000L)));
+      = std::ldexp(gamma, clamped_exponent_difference(0, max_exp));
     const double denom = std::max(std::abs(lambda_scaled), gamma_scaled);
     rel_err_estimate = err / denom;
     if(inject == "gate" || !(rel_err_estimate <= tol))
@@ -278,7 +296,7 @@ El::BigFloat step_length(const Block_Diagonal_Matrix &MCholesky,
                            lambda.gmp_float.get_mpf_t(), scale_exp);
             else
               mpf_div_2exp(lambda.gmp_float.get_mpf_t(),
-                           lambda.gmp_float.get_mpf_t(), -scale_exp);
+                           lambda.gmp_float.get_mpf_t(), exponent_magnitude(scale_exp));
             local_min = El::Min(local_min, lambda);
             from_double[b] = 1;
           }
@@ -313,8 +331,8 @@ El::BigFloat step_length(const Block_Diagonal_Matrix &MCholesky,
     = El::mpi::AllReduce(local_min, El::mpi::MIN, El::mpi::COMM_WORLD);
   const El::BigFloat alpha = alpha_from_lambda(lambda, gamma);
 
-  // Full-precision guard: I + alpha A must be positive definite for every
-  // block whose eigenvalue came from double.
+  // Numerical working-precision guard for I + alpha A on double-derived
+  // blocks. Floating Cholesky success is not an exact PD certificate.
   int local_fail = 0;
   {
     Scoped_Timer guard_timer(timers, "guard_cholesky");
