@@ -137,7 +137,8 @@ namespace
     // Exponent differences must also be clamped before signed arithmetic.
     std::vector<double> a(size_t(n) * n, 0.0);
     std::vector<long> exps(size_t(n) * n, 0);
-    long max_exp = std::numeric_limits<long>::min();
+    long max_exp = 0;
+    bool have_nonzero = false;
     for(int j = 0; j < n; ++j)
       for(int i = j; i < n; ++i)
         {
@@ -146,11 +147,12 @@ namespace
             = mpf_get_d_2exp(&e, block.CRef(i, j).gmp_float.get_mpf_t());
           a[i + size_t(j) * n] = d;
           exps[i + size_t(j) * n] = e;
-          if(d != 0 && e > max_exp)
-            max_exp = e;
+          if(d != 0 && (!have_nonzero || e > max_exp))
+            {
+              max_exp = e;
+              have_nonzero = true;
+            }
         }
-    if(max_exp == std::numeric_limits<long>::min())
-      max_exp = 0; // zero block
     scale_exp = max_exp;
     double frob2 = 0;
     for(int j = 0; j < n; ++j)
