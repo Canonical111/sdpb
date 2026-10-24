@@ -1,4 +1,5 @@
 #pragma once
+#include "config.hpp"
 #include "partitioned.hpp"
 #include "step.hpp"
 #include "sdp_solve/Block_Diagonal_Matrix.hxx"
@@ -27,12 +28,9 @@ inline bool usable(const StepResult& s, int bits) {
 struct Outcome { int status=certified; B alpha=1; double reduction=0,kernel=0; };
 // The pristine congruence is retained unmodified. Each trial reduction owns a
 // copy; pristine fallback must receive A, not its overwritten trial.
-inline Outcome attempt(const Block_Diagonal_Matrix& A,const B& gamma) {
+inline Outcome attempt(const Block_Diagonal_Matrix& A,const B& gamma,const Config& config) {
   Outcome out;
   const int bits=El::gmp::Precision();
-  const char* injection=std::getenv("SDPB_SELECTED_INJECT");
-  const char* rank_text=std::getenv("SDPB_SELECTED_INJECT_RANK");
-  const int target=rank_text?std::atoi(rank_text):0;
   for(const auto& original:A.blocks) {
     if(original.Height()==0) continue;
     auto comm=original.Grid().Comm();
@@ -48,8 +46,8 @@ inline Outcome attempt(const Block_Diagonal_Matrix& A,const B& gamma) {
     if(El::mpi::Rank(comm)==0) {
       mpfr_clear_flags();
       try {
-        const std::string inject=(injection && El::mpi::Rank()==target)?injection:"";
-        if(inject=="exception") throw std::runtime_error("injected root exception");
+        const int inject=El::mpi::Rank()==config.target?config.inject:none;
+        if(inject==inject_exception) throw std::runtime_error("injected root exception");
         std::vector<B>diag(original.Height()),off(original.Height()-1);
         for(int i=0;i<original.Height();++i)diag[i]=dr.GetLocal(i,0);
         for(int i=0;i<original.Height()-1;++i)off[i]=er.GetLocal(i,0);
@@ -60,10 +58,10 @@ inline Outcome attempt(const Block_Diagonal_Matrix& A,const B& gamma) {
           if(!usable(s,bits)) status=width;
           else alpha=s.alpha;
         }
-        if(inject=="uncertain") status=uncertain;
-        if(inject=="range") status=range;
-        if(inject=="work") status=work_limit;
-        if(inject=="width") status=width;
+        if(inject==inject_uncertain) status=uncertain;
+        if(inject==inject_range) status=range;
+        if(inject==inject_work) status=work_limit;
+        if(inject==inject_width) status=width;
       } catch(const std::exception& ex) {
         const std::string message=ex.what();
         status=message.find("range")!=std::string::npos?range:exception;

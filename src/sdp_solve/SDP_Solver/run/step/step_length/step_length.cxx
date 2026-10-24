@@ -37,9 +37,11 @@ El::BigFloat step_length(const Block_Diagonal_Matrix &MCholesky,
   const double begin=selected::seconds();
   lower_triangular_inverse_congruence(MCholesky, MInvDM);
   const double congruence=selected::seconds()-begin;
-  const char* backend=std::getenv("SDPB_SELECTED_STEP");
-  if(backend && std::string(backend)=="1") {
-    auto outcome=selected::attempt(MInvDM,gamma);
+  // Collective once per process, before any rank picks a schedule; a
+  // mismatched or malformed configuration throws on every rank alike.
+  static const selected::Config config=selected::configure();
+  if(config.enabled) {
+    auto outcome=selected::attempt(MInvDM,gamma,config);
     double fallback=0;
     El::BigFloat alpha=outcome.alpha;
     if(outcome.status!=selected::certified) {
