@@ -75,10 +75,11 @@ namespace
     const char *value = std::getenv(name);
     return value == nullptr ? default_value : std::atoi(value);
   }
+  bool multimodular_trsm_flag = false; // --multimodularTrsm
   bool use_multimodular_trsm()
   {
-    static const bool result = env_int("SDPB_MULTIMODULAR_TRSM", 0) != 0;
-    return result;
+    static const bool from_env = env_int("SDPB_MULTIMODULAR_TRSM", 0) != 0;
+    return multimodular_trsm_flag || from_env;
   }
   const Multimodular_Blas_Config &multimodular_config()
   {
@@ -892,4 +893,10 @@ void compute_Q(const Environment &env, const SDP &sdp,
                                 timers, block_timings_ms, verbosity);
   syrk_Q(env, schur_off_diagonal, bigint_syrk_context, Q, timers,
          block_timings_ms, verbosity);
+}
+
+// Called by SDP_Solver::run with --multimodularTrsm
+void set_multimodular_trsm(bool enable)
+{
+  multimodular_trsm_flag = enable;
 }

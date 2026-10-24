@@ -1,6 +1,7 @@
 # Multimodular per-block Cholesky and Trsm
 
-lab (agent), dsd-lab-playground/bootstrap-speed#145. Experimental, behind `SDPB_MULTIMODULAR_TRSM=1`.
+lab (agent), dsd-lab-playground/bootstrap-speed#145. Experimental: `sdpb --multimodularTrsm` (or the environment
+variable `SDPB_MULTIMODULAR_TRSM=1`).
 
 ## What it replaces
 
@@ -63,7 +64,7 @@ triangle instead, filled by panel allgathers.
 
 | variable | default | meaning |
 |---|---|---|
-| `SDPB_MULTIMODULAR_TRSM` | 0 | 1 enables the multimodular path |
+| `SDPB_MULTIMODULAR_TRSM` | 0 | 1 enables the multimodular path (same as `--multimodularTrsm`) |
 | `SDPB_MULTIMODULAR_BASE` | 32 | diagonal block size in BigFloat; panel height of the left-looking Trsm |
 | `SDPB_MULTIMODULAR_MIN_SIZE` | 1 | smaller blocks use El (default: none; below `base` the path is the BigFloat substitution, still ~2x faster than El) |
 | `SDPB_MULTIMODULAR_DIST_MIN` | 256 | Cholesky levels of at least this size are split over the grid |

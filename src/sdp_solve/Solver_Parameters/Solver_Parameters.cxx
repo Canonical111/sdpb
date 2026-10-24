@@ -25,6 +25,14 @@ boost::program_options::options_description Solver_Parameters::options()
     "preprocessing the input PMP files with 'pmp2sdp'.  GMP will round "
     "this up to a multiple of 32 or 64, depending on the system.");
   result.add_options()(
+    "multimodularTrsm",
+    boost::program_options::bool_switch(&multimodular_trsm)
+      ->default_value(false),
+    "Experimental: compute the per-block Cholesky decompositions and "
+    "L^{-1} B with multimodular BLAS (fixed point, residues modulo primes, "
+    "dgemm, CRT) instead of El BigFloat routines. Equivalent to "
+    "SDPB_MULTIMODULAR_TRSM=1; tuning via SDPB_MULTIMODULAR_* variables.");
+  result.add_options()(
     "findPrimalFeasible",
     boost::program_options::bool_switch(&find_primal_feasible)
       ->default_value(false),
@@ -167,6 +175,7 @@ boost::property_tree::ptree to_property_tree(const Solver_Parameters &p)
              String_To_Bytes_Translator());
   result.put("checkpointInterval", p.checkpoint_interval);
   result.put("findPrimalFeasible", p.find_primal_feasible);
+  result.put("multimodularTrsm", p.multimodular_trsm);
   result.put("findDualFeasible", p.find_dual_feasible);
   result.put("detectPrimalFeasibleJump", p.detect_primal_feasible_jump);
   result.put("detectDualFeasibleJump", p.detect_dual_feasible_jump);
@@ -195,6 +204,7 @@ std::ostream &operator<<(std::ostream &os, const Solver_Parameters &p)
      << "checkpointInterval           = " << p.checkpoint_interval << '\n'
      << "maxSharedMemory              = "
      << pretty_print_bytes(p.max_shared_memory_bytes, true) << '\n'
+     << "multimodularTrsm             = " << p.multimodular_trsm << '\n'
      << "findPrimalFeasible           = " << p.find_primal_feasible << '\n'
      << "findDualFeasible             = " << p.find_dual_feasible << '\n'
      << "detectPrimalFeasibleJump     = " << p.detect_primal_feasible_jump
