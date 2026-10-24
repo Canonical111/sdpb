@@ -1,7 +1,6 @@
 #include "multimodular_blas.hxx"
 
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/fmpz/Fmpz_Comb.hxx"
-#include "sdp_solve/SDP_Solver/run/bigint_syrk/fmpz/fmpz_mul_blas_util.hxx"
 #include "sdpb_util/assert.hxx"
 
 #include <flint/ulong_extras.h>
