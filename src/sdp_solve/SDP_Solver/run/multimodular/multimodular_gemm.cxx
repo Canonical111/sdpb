@@ -9,8 +9,6 @@
 #include <cblas.h>
 
 #include <chrono>
-#include <cstdio>
-#include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -56,16 +54,6 @@ namespace
     return std::chrono::duration<double>(Clock::now() - start).count();
   }
 
-  struct Debug_Timers
-  {
-    double chunks = 0, gemm = 0, mod = 0;
-    ~Debug_Timers()
-    {
-      if(std::getenv("MM_DEBUG_TIMING"))
-        fprintf(stderr, "residues: chunks %.3f gemm %.3f mod %.3f\n", chunks,
-                gemm, mod);
-    }
-  } debug_timers;
   constexpr int chunk_bits = 24;
   constexpr mp_limb_t chunk_mask = (mp_limb_t(1) << chunk_bits) - 1;
 
@@ -269,7 +257,6 @@ namespace
     for(size_t e0 = 0; e0 < n; e0 += batch)
       {
         const size_t nb = std::min(batch, n - e0);
-        auto t_start = Clock::now();
         for(size_t e = 0; e < nb; ++e)
           {
             long shift;
@@ -282,14 +269,10 @@ namespace
             else
               write_chunks(x, shift, T, chunks.data() + e, nb, buffer);
           }
-        debug_timers.chunks += seconds_since(t_start);
-        t_start = Clock::now();
         // |sum| < T 2^24 p < 2^53
         cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, nb,
                     num_primes, T, 1.0, chunks.data(), nb, context.W.data(),
                     T, 0.0, out + e0, prime_stride);
-        debug_timers.gemm += seconds_since(t_start);
-        t_start = Clock::now();
         for(size_t i = 0; i < num_primes; ++i)
           {
             const double p = context.primes[i];
@@ -307,7 +290,6 @@ namespace
                   r[e] = round_mod(r[e], p, inv_p);
               }
           }
-        debug_timers.mod += seconds_since(t_start);
       }
   }
 

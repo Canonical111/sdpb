@@ -209,6 +209,7 @@ namespace
     config.left_looking = std::stoi(get("left-looking", "1")) != 0;
     config.growth_bits = std::stoi(get("growth", "32"));
     config.left_looking_bytes = size_t(std::stoi(get("ll-mb", "384"))) << 20;
+    config.left_looking_max_ratio = std::stod(get("ll-ratio", "2"));
 
     El::gmp::SetPrecision(precision == 0 ? file_precision(positional[0])
                                          : precision);

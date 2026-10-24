@@ -32,8 +32,12 @@ struct Multimodular_Blas_Config
   // Reconstruct products with FLINT's fmpz_multi_CRT_ui (exact, slower)
   // instead of the truncated BLAS CRT. For testing.
   bool flint_crt = false;
-  // Trsm: left-looking (each conversion once) instead of recursive
+  // Trsm: left-looking (each conversion once) instead of recursive, when
+  // B has at most left_looking_max_ratio * L.Height() columns. (Measured:
+  // left-looking is faster for few columns, e.g. a 975-row block with 262
+  // columns per rank; recursive is faster for many, e.g. 195 x 1834.)
   bool left_looking = true;
+  double left_looking_max_ratio = 2.0;
   // Left-looking Trsm: headroom of the per-column fixed-point scale of X
   int growth_bits = 32;
   // Left-looking Trsm: memory for the stored residues of X; sets the
