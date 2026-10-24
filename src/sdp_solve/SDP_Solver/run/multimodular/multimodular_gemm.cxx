@@ -16,6 +16,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <tuple>
 #include <vector>
 
 void Multimodular_Blas_Timings::add(const Multimodular_Blas_Timings &other)
@@ -152,13 +153,15 @@ namespace
     int num_limbs;
     std::vector<mp_limb_t> qM;
 
-    // Product bound: |c| < k 2^(2 bits) < 2^(2 bits + bits(k)); 3 more
-    // bits make |c|/M < 1/8 for the rounding of q.
-    Residue_Context(long bits, slong k)
-        : comb(2 * bits + FLINT_BIT_COUNT(k) + 3, k),
+    // Integers |a| < 2^bits_A, |b| < 2^bits_B, inner dimension <= k.
+    // Product bound: |c| < k 2^(bits_A + bits_B); 3 more bits make
+    // |c|/M < 1/8 for the rounding of q.
+    Residue_Context(long bits_A, long bits_B, slong k)
+        : comb(bits_A + bits_B + FLINT_BIT_COUNT(k) + 3, k),
           num_primes(comb.num_primes),
-          num_chunks((bits + chunk_bits - 1) / chunk_bits)
+          num_chunks((std::max(bits_A, bits_B) + chunk_bits - 1) / chunk_bits)
     {
+      const long bits = std::min(bits_A, bits_B);
       primes.resize(num_primes);
       inverse_primes.resize(num_primes);
       u.resize(num_primes);
@@ -226,13 +229,14 @@ namespace
     }
   };
 
-  Residue_Context &get_context(long bits, slong k)
+  Residue_Context &get_context(long bits_A, long bits_B, slong k)
   {
-    static std::map<std::pair<long, slong>, std::unique_ptr<Residue_Context>>
+    static std::map<std::tuple<long, long, slong>,
+                    std::unique_ptr<Residue_Context>>
       cache;
-    auto &context = cache[{bits, k}];
+    auto &context = cache[{bits_A, bits_B, k}];
     if(!context)
-      context = std::make_unique<Residue_Context>(bits, k);
+      context = std::make_unique<Residue_Context>(bits_A, bits_B, k);
     return *context;
   }
 
@@ -253,8 +257,10 @@ namespace
   template <class Element>
   void compute_residues(const Residue_Context &context, size_t n,
                         const Element &element, bool multiply_by_u,
-                        double *out)
+                        double *out, size_t prime_stride = 0)
   {
+    if(prime_stride == 0)
+      prime_stride = n;
     const size_t num_primes = context.num_primes;
     const int T = context.num_chunks;
     constexpr size_t batch = 2048;
@@ -281,14 +287,14 @@ namespace
         // |sum| < T 2^24 p < 2^53
         cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, nb,
                     num_primes, T, 1.0, chunks.data(), nb, context.W.data(),
-                    T, 0.0, out + e0, n);
+                    T, 0.0, out + e0, prime_stride);
         debug_timers.gemm += seconds_since(t_start);
         t_start = Clock::now();
         for(size_t i = 0; i < num_primes; ++i)
           {
             const double p = context.primes[i];
             const double inv_p = context.inverse_primes[i];
-            double *__restrict r = out + e0 + n * i;
+            double *__restrict r = out + e0 + prime_stride * i;
             if(multiply_by_u)
               {
                 const double u = context.u[i];
@@ -346,6 +352,137 @@ namespace
   }
 }
 
+namespace
+{
+  constexpr long no_exponent = std::numeric_limits<long>::min();
+
+  // Scratch space and the CRT step shared by the GEMM and the Trsm.
+  struct Crt_Workspace
+  {
+    std::vector<double> quotients, S_high;
+    std::vector<mp_limb_t> crt_input, acc;
+    fmpz_t z;
+    mpf_t value;
+    explicit Crt_Workspace(const Residue_Context &context)
+        : crt_input(context.num_primes), acc(context.num_limbs)
+    {
+      fmpz_init(z);
+      mpf_init2(value, El::gmp::Precision());
+    }
+    ~Crt_Workspace()
+    {
+      mpf_clear(value);
+      fmpz_clear(z);
+    }
+  };
+
+  // C_residues: num_primes blocks (stride m*width) of the m x width residue
+  // products (unreduced dgemm output; times u_p unless flint_crt).
+  // C(i, j) -= c_ij 2^(row_exp[i] + col_exp[j] - shift_base)
+  // for row_start[j] <= i < m.
+  void crt_subtract(const Residue_Context &context, bool flint_crt,
+                    double *C_residues, int m, int width,
+                    El::Matrix<El::BigFloat> &C,
+                    const std::vector<long> &row_exp,
+                    const std::vector<long> &col_exp, long shift_base,
+                    const std::vector<int> &row_start, Crt_Workspace &work)
+  {
+    const size_t num_primes = context.num_primes;
+    const size_t C_stride = size_t(m) * width;
+    Fmpz_Comb &comb = const_cast<Fmpz_Comb &>(context.comb);
+    if(!flint_crt)
+      {
+        // y_p = (u_p c mod p) in [0, p); q = round(sum_p y_p / p)
+        work.quotients.assign(C_stride, 0.0);
+        work.S_high.resize(C_stride * context.num_high_chunks);
+        for(size_t p = 0; p < num_primes; ++p)
+          {
+            const double prime = context.primes[p];
+            const double inv_p = context.inverse_primes[p];
+            double *__restrict y = C_residues + p * C_stride;
+            double *__restrict q = work.quotients.data();
+            for(size_t e = 0; e < C_stride; ++e)
+              {
+                const double r = mod_p(y[e], prime, inv_p);
+                y[e] = r;
+                q[e] += r * inv_p;
+              }
+          }
+        // S_t = sum_p y_p m_pt
+        cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, C_stride,
+                    context.num_high_chunks, num_primes, 1.0, C_residues,
+                    C_stride, context.M_chunks.data(), num_primes, 0.0,
+                    work.S_high.data(), C_stride);
+      }
+    for(int j = 0; j < width; ++j)
+      {
+        if(col_exp[j] == no_exponent)
+          continue;
+        for(int i = std::max(row_start[j], 0); i < m; ++i)
+          {
+            if(row_exp[i] == no_exponent)
+              continue;
+            const size_t e = i + size_t(j) * m;
+            long shift = row_exp[i] + col_exp[j] - shift_base;
+            if(!flint_crt)
+              {
+                const size_t q = std::lround(work.quotients[e]);
+                int size;
+                const int sign = assemble(
+                  context, work.S_high.data() + e, C_stride,
+                  context.qM.data() + q * context.num_limbs, work.acc.data(),
+                  size);
+                if(size == 0)
+                  continue;
+                __mpf_struct view;
+                view._mp_prec = size;
+                view._mp_size = sign * size;
+                view._mp_exp = size;
+                view._mp_d = work.acc.data();
+                shift += chunk_bits * context.t0;
+                if(shift >= 0)
+                  mpf_mul_2exp(work.value, &view, shift);
+                else
+                  mpf_div_2exp(work.value, &view, -shift);
+              }
+            else
+              {
+                for(size_t p = 0; p < num_primes; ++p)
+                  work.crt_input[p] = double_to_uint32_t_residue(
+                    C_residues[e + p * C_stride], comb.mods[p]);
+                fmpz_multi_CRT_ui(work.z, work.crt_input.data(), comb.comb,
+                                  comb.comb_temp, 1);
+                if(fmpz_is_zero(work.z))
+                  continue;
+                fmpz_get_mpf(work.value, work.z);
+                if(shift >= 0)
+                  mpf_mul_2exp(work.value, work.value, shift);
+                else
+                  mpf_div_2exp(work.value, work.value, -shift);
+              }
+            auto &c = C.Ref(i, j).gmp_float;
+            mpf_sub(c.get_mpf_t(), c.get_mpf_t(), work.value);
+          }
+      }
+  }
+
+  // Exponents of the largest entry of each row of A (rows = true) or of
+  // each column (rows = false); no_exponent for zero rows/columns.
+  template <class Get>
+  std::vector<long> max_exponents(int count, int length, const Get &get)
+  {
+    std::vector<long> result(count, no_exponent);
+    for(int a = 0; a < count; ++a)
+      for(int l = 0; l < length; ++l)
+        {
+          long e;
+          if(binary_exponent(get(a, l), e))
+            result[a] = std::max(result[a], e);
+        }
+    return result;
+  }
+}
+
 void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
                            const El::Matrix<El::BigFloat> &A,
                            const El::Orientation orientation_B,
@@ -387,31 +524,18 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
   const long bits = El::gmp::Precision() + config.guard_bits;
   auto start = Clock::now();
 
-  // Row exponents of A and column exponents of op(B).
-  // Zero rows/columns are skipped.
-  constexpr long no_exponent = std::numeric_limits<long>::min();
-  std::vector<long> row_exp(m, no_exponent), col_exp(n, no_exponent);
-  for(int l = 0; l < k; ++l)
-    for(int i = 0; i < m; ++i)
-      {
-        long e;
-        if(binary_exponent(A.CRef(i, l), e))
-          row_exp[i] = std::max(row_exp[i], e);
-      }
-  for(int j = 0; j < n; ++j)
-    for(int l = 0; l < k; ++l)
-      {
-        long e;
-        if(binary_exponent(op_B(l, j), e))
-          col_exp[j] = std::max(col_exp[j], e);
-      }
+  const std::vector<long> row_exp = max_exponents(
+    m, k, [&](int i, int l) -> const El::BigFloat & { return A.CRef(i, l); });
+  const std::vector<long> col_exp
+    = max_exponents(n, k, [&](int j, int l) -> const El::BigFloat & {
+        return op_B(l, j);
+      });
 
-  const Residue_Context &context = get_context(bits, k);
-  Fmpz_Comb &comb = const_cast<Fmpz_Comb &>(context.comb);
+  const Residue_Context &context = get_context(bits, bits, k);
   const size_t num_primes = context.num_primes;
   timings.max_num_primes = std::max(timings.max_num_primes, num_primes);
   ++timings.num_gemms;
-  const bool blas_crt = !config.flint_crt;
+  const bool flint_crt = config.flint_crt;
 
   // Residues of A (times u_p for the BLAS CRT):
   // for prime p, an m x k column-major matrix at p*m*k
@@ -426,24 +550,13 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
       shift = bits - row_exp[i];
       return A.CRef(i, l).gmp_float.get_mpf_t();
     },
-    blas_crt, A_residues.data());
+    !flint_crt, A_residues.data());
   timings.to_int_seconds += seconds_since(start);
 
   const int chunk = std::max(1, std::min(config.column_chunk, n));
   std::vector<double> B_residues(num_primes * size_t(k) * chunk);
   std::vector<double> C_residues(num_primes * size_t(m) * chunk);
-  std::vector<double> quotients, S_high;
-  if(blas_crt)
-    {
-      quotients.resize(size_t(m) * chunk);
-      S_high.resize(size_t(m) * chunk * context.num_high_chunks);
-    }
-  std::vector<mp_limb_t> crt_input(num_primes);
-  std::vector<mp_limb_t> acc(context.num_limbs);
-  fmpz_t z;
-  fmpz_init(z);
-  mpf_t value;
-  mpf_init2(value, El::gmp::Precision());
+  Crt_Workspace work(context);
 
   for(int j0 = 0; j0 < n; j0 += chunk)
     {
@@ -475,82 +588,157 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
       timings.blas_seconds += seconds_since(start);
 
       start = Clock::now();
-      if(blas_crt)
-        {
-          // y_p = (u_p c mod p) in [0, p); q = round(sum_p y_p / p)
-          std::fill(quotients.begin(), quotients.begin() + C_stride, 0.0);
-          for(size_t p = 0; p < num_primes; ++p)
-            {
-              const double prime = context.primes[p];
-              const double inv_p = context.inverse_primes[p];
-              double *__restrict y = C_residues.data() + p * C_stride;
-              double *__restrict q = quotients.data();
-              for(size_t e = 0; e < C_stride; ++e)
-                {
-                  const double r = mod_p(y[e], prime, inv_p);
-                  y[e] = r;
-                  q[e] += r * inv_p;
-                }
-            }
-          // S_t = sum_p y_p m_pt
-          cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, C_stride,
-                      context.num_high_chunks, num_primes, 1.0,
-                      C_residues.data(), C_stride, context.M_chunks.data(),
-                      num_primes, 0.0, S_high.data(), C_stride);
-        }
-      for(int jj = 0; jj < width; ++jj)
-        {
-          const int j = j0 + jj;
-          if(col_exp[j] == no_exponent)
-            continue;
-          for(int i = std::max(row_start[j], 0); i < m; ++i)
-            {
-              if(row_exp[i] == no_exponent)
-                continue;
-              const size_t e = i + size_t(jj) * m;
-              long shift = row_exp[i] + col_exp[j] - 2 * bits;
-              if(blas_crt)
-                {
-                  const size_t q = std::lround(quotients[e]);
-                  int size;
-                  const int sign = assemble(
-                    context, S_high.data() + e, C_stride,
-                    context.qM.data() + q * context.num_limbs, acc.data(),
-                    size);
-                  if(size == 0)
-                    continue;
-                  __mpf_struct view;
-                  view._mp_prec = size;
-                  view._mp_size = sign * size;
-                  view._mp_exp = size;
-                  view._mp_d = acc.data();
-                  shift += chunk_bits * context.t0;
-                  if(shift >= 0)
-                    mpf_mul_2exp(value, &view, shift);
-                  else
-                    mpf_div_2exp(value, &view, -shift);
-                }
-              else
-                {
-                  for(size_t p = 0; p < num_primes; ++p)
-                    crt_input[p] = double_to_uint32_t_residue(
-                      C_residues[e + p * C_stride], comb.mods[p]);
-                  fmpz_multi_CRT_ui(z, crt_input.data(), comb.comb,
-                                    comb.comb_temp, 1);
-                  if(fmpz_is_zero(z))
-                    continue;
-                  fmpz_get_mpf(value, z);
-                  if(shift >= 0)
-                    mpf_mul_2exp(value, value, shift);
-                  else
-                    mpf_div_2exp(value, value, -shift);
-                }
-              auto &c = C.Ref(i, j).gmp_float;
-              mpf_sub(c.get_mpf_t(), c.get_mpf_t(), value);
-            }
-        }
+      auto C_chunk = C(El::ALL, El::IR(j0, j0 + width));
+      const std::vector<long> chunk_col_exp(col_exp.begin() + j0,
+                                            col_exp.begin() + j0 + width);
+      const std::vector<int> chunk_row_start(row_start.begin() + j0,
+                                             row_start.begin() + j0 + width);
+      crt_subtract(context, flint_crt, C_residues.data(), m, width, C_chunk,
+                   row_exp, chunk_col_exp, 2 * bits, chunk_row_start, work);
       timings.from_int_seconds += seconds_since(start);
     }
-  mpf_clear(value);
-  fmpz_clear(z);
+}
+
+// Left-looking blocked Trsm with each conversion done once.
+// For each column chunk, for each panel of h <= base_size rows:
+//   B_p -= L_{p,<p} X_{<p}   (multimodular GEMM, inner dimension r0)
+//   X_p = L_pp^{-1} B_p      (substitution)
+//   residues of X_p are stored for the following panels.
+// X is stored with one fixed-point scale per column, 2^(bits_X - e_j),
+// where e_j = (largest exponent seen in column j) + growth_bits; if a
+// later panel exceeds 2^e_j, e_j is raised and the stored residues of that
+// column are recomputed from the BigFloat values.
+void multimodular_trsm_left_looking(const El::Matrix<El::BigFloat> &L,
+                                    El::Matrix<El::BigFloat> &B,
+                                    const Multimodular_Blas_Config &config,
+                                    Multimodular_Blas_Timings &timings)
+{
+  const int P = L.Height();
+  const int N = B.Width();
+  ASSERT_EQUAL(L.Width(), P);
+  ASSERT_EQUAL(B.Height(), P);
+  const int b = std::max(1, config.base_size);
+  if(P == 0 || N == 0)
+    return;
+  if(P <= b)
+    {
+      auto start = Clock::now();
+      substitution_trsm(L, B);
+      timings.base_seconds += seconds_since(start);
+      return;
+    }
+  const long bits_L = El::gmp::Precision() + config.guard_bits;
+  const long bits_X = bits_L + config.growth_bits;
+  const Residue_Context &context = get_context(bits_L, bits_X, P);
+  const size_t num_primes = context.num_primes;
+  timings.max_num_primes = std::max(timings.max_num_primes, num_primes);
+  const bool flint_crt = config.flint_crt;
+
+  const int chunk = std::max<size_t>(
+    1, std::min<size_t>(N, config.left_looking_bytes
+                             / (sizeof(double) * num_primes * P)));
+  const size_t X_stride = size_t(P) * chunk; // per prime
+  std::vector<double> X_residues(num_primes * X_stride);
+  std::vector<double> A_residues, C_residues, panel_residues;
+  Crt_Workspace work(context);
+
+  for(int j0 = 0; j0 < N; j0 += chunk)
+    {
+      const int width = std::min(chunk, N - j0);
+      std::vector<long> col_e(width, no_exponent);
+      for(int r0 = 0; r0 < P; r0 += b)
+        {
+          const int h = std::min(b, P - r0);
+          auto R = B(El::IR(r0, r0 + h), El::IR(j0, j0 + width));
+          if(r0 > 0)
+            {
+              auto start = Clock::now();
+              const auto A = L(El::IR(r0, r0 + h), El::IR(0, r0));
+              const std::vector<long> row_exp = max_exponents(
+                h, r0, [&](int i, int l) -> const El::BigFloat & {
+                  return A.CRef(i, l);
+                });
+              const size_t A_stride = size_t(h) * r0;
+              A_residues.resize(num_primes * A_stride);
+              compute_residues(
+                context, A_stride,
+                [&](size_t e, long &shift) -> const __mpf_struct * {
+                  const int i = e % h, l = e / h;
+                  if(row_exp[i] == no_exponent)
+                    return nullptr;
+                  shift = bits_L - row_exp[i];
+                  return A.CRef(i, l).gmp_float.get_mpf_t();
+                },
+                !flint_crt, A_residues.data());
+              timings.to_int_seconds += seconds_since(start);
+
+              start = Clock::now();
+              const size_t C_stride = size_t(h) * width;
+              C_residues.resize(num_primes * C_stride);
+              for(size_t p = 0; p < num_primes; ++p)
+                cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, h,
+                            width, r0, 1.0, A_residues.data() + p * A_stride,
+                            h, X_residues.data() + p * X_stride, P, 0.0,
+                            C_residues.data() + p * C_stride, h);
+              timings.blas_seconds += seconds_since(start);
+              ++timings.num_gemms;
+
+              start = Clock::now();
+              crt_subtract(context, flint_crt, C_residues.data(), h, width, R,
+                           row_exp, col_e, bits_L + bits_X,
+                           std::vector<int>(width, 0), work);
+              timings.from_int_seconds += seconds_since(start);
+            }
+
+          auto start = Clock::now();
+          substitution_trsm(L(El::IR(r0, r0 + h), El::IR(r0, r0 + h)), R);
+          timings.base_seconds += seconds_since(start);
+
+          start = Clock::now();
+          // Column scales: first nonzero panel sets them; growth beyond the
+          // headroom raises them and recomputes the stored residues.
+          const std::vector<long> panel_exp = max_exponents(
+            width, h,
+            [&](int j, int i) -> const El::BigFloat & { return R.CRef(i, j); });
+          for(int j = 0; j < width; ++j)
+            {
+              if(panel_exp[j] == no_exponent || panel_exp[j] <= col_e[j])
+                continue;
+              const bool had_nonzero = col_e[j] != no_exponent;
+              col_e[j] = panel_exp[j] + config.growth_bits;
+              if(had_nonzero && r0 > 0)
+                {
+                  ++timings.num_rescales;
+                  compute_residues(
+                    context, r0,
+                    [&](size_t e, long &shift) -> const __mpf_struct * {
+                      shift = bits_X - col_e[j];
+                      return B.CRef(e, j0 + j).gmp_float.get_mpf_t();
+                    },
+                    false, X_residues.data() + size_t(P) * j, X_stride);
+                }
+            }
+          // Residues of the new panel rows, then into the X store
+          const size_t panel_stride = size_t(h) * width;
+          panel_residues.resize(num_primes * panel_stride);
+          compute_residues(
+            context, panel_stride,
+            [&](size_t e, long &shift) -> const __mpf_struct * {
+              const int i = e % h, j = e / h;
+              if(col_e[j] == no_exponent)
+                return nullptr;
+              shift = bits_X - col_e[j];
+              return R.CRef(i, j).gmp_float.get_mpf_t();
+            },
+            false, panel_residues.data());
+          for(size_t p = 0; p < num_primes; ++p)
+            for(int j = 0; j < width; ++j)
+              std::copy_n(panel_residues.data() + p * panel_stride
+                            + size_t(j) * h,
+                          h,
+                          X_residues.data() + p * X_stride + size_t(j) * P
+                            + r0);
+          timings.to_int_seconds += seconds_since(start);
+        }
+    }
 }

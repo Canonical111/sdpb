@@ -21,8 +21,10 @@
 
 struct Multimodular_Blas_Config
 {
-  // Matrices of at most this size are processed by El::Cholesky / El::Trsm
-  int base_size = 64;
+  // Diagonal blocks of at most this size are processed in BigFloat
+  // (El::Cholesky / substitution); also the panel height of the
+  // left-looking Trsm
+  int base_size = 32;
   // Extra bits of the fixed-point integers on top of El::gmp::Precision()
   int guard_bits = 64;
   // Columns of op(B) processed at once (bounds the memory for residues)
@@ -30,6 +32,13 @@ struct Multimodular_Blas_Config
   // Reconstruct products with FLINT's fmpz_multi_CRT_ui (exact, slower)
   // instead of the truncated BLAS CRT. For testing.
   bool flint_crt = false;
+  // Trsm: left-looking (each conversion once) instead of recursive
+  bool left_looking = true;
+  // Left-looking Trsm: headroom of the per-column fixed-point scale of X
+  int growth_bits = 32;
+  // Left-looking Trsm: memory for the stored residues of X; sets the
+  // number of columns processed at once (L is converted once per chunk)
+  size_t left_looking_bytes = size_t(384) << 20;
 };
 
 struct Multimodular_Blas_Timings
@@ -40,6 +49,7 @@ struct Multimodular_Blas_Timings
   double from_int_seconds = 0; // CRT, fmpz -> BigFloat, update of C
   size_t num_gemms = 0;
   size_t max_num_primes = 0;
+  size_t num_rescales = 0; // left-looking Trsm: column scale raised
   void add(const Multimodular_Blas_Timings &other);
 };
 
@@ -67,6 +77,17 @@ void multimodular_trsm_left_lower(const El::Matrix<El::BigFloat> &L,
                                   El::Matrix<El::BigFloat> &B,
                                   const Multimodular_Blas_Config &config,
                                   Multimodular_Blas_Timings &timings);
+
+// Left-looking variant (see multimodular_gemm.cxx); used by
+// multimodular_trsm_left_lower when config.left_looking.
+void multimodular_trsm_left_looking(const El::Matrix<El::BigFloat> &L,
+                                    El::Matrix<El::BigFloat> &B,
+                                    const Multimodular_Blas_Config &config,
+                                    Multimodular_Blas_Timings &timings);
+
+// B := L^{-1} B by forward substitution in BigFloat (base case)
+void substitution_trsm(const El::Matrix<El::BigFloat> &L,
+                       El::Matrix<El::BigFloat> &B);
 
 // A := L, the lower Cholesky factor of A, as El::Cholesky(LOWER, A):
 // only the lower triangle is read and written.

@@ -61,7 +61,8 @@ namespace
   // Multimodular per-block Cholesky and Trsm (lab #145), enabled by
   // SDPB_MULTIMODULAR_TRSM=1. Optional SDPB_MULTIMODULAR_BASE,
   // SDPB_MULTIMODULAR_GUARD, SDPB_MULTIMODULAR_CHUNK,
-  // SDPB_MULTIMODULAR_FLINT_CRT set the config.
+  // SDPB_MULTIMODULAR_FLINT_CRT, SDPB_MULTIMODULAR_LEFT_LOOKING,
+  // SDPB_MULTIMODULAR_GROWTH, SDPB_MULTIMODULAR_LL_MB set the config.
   // Blocks smaller than SDPB_MULTIMODULAR_MIN_SIZE (default 2 * base)
   // use the El routines.
   int env_int(const char *name, int default_value)
@@ -82,6 +83,12 @@ namespace
       c.guard_bits = env_int("SDPB_MULTIMODULAR_GUARD", c.guard_bits);
       c.column_chunk = env_int("SDPB_MULTIMODULAR_CHUNK", c.column_chunk);
       c.flint_crt = env_int("SDPB_MULTIMODULAR_FLINT_CRT", 0) != 0;
+      c.left_looking = env_int("SDPB_MULTIMODULAR_LEFT_LOOKING", 1) != 0;
+      c.growth_bits = env_int("SDPB_MULTIMODULAR_GROWTH", c.growth_bits);
+      c.left_looking_bytes
+        = size_t(env_int("SDPB_MULTIMODULAR_LL_MB",
+                         c.left_looking_bytes >> 20))
+          << 20;
       return c;
     }();
     return config;

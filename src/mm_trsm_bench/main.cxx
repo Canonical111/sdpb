@@ -202,10 +202,13 @@ namespace
     const int n = std::stoi(get("n", "-1"));
     const int cols = std::stoi(get("cols", "-1"));
     Multimodular_Blas_Config config;
-    config.base_size = std::stoi(get("base", "64"));
+    config.base_size = std::stoi(get("base", "32"));
     config.guard_bits = std::stoi(get("guard", "64"));
     config.column_chunk = std::stoi(get("chunk", "256"));
     config.flint_crt = std::stoi(get("flint-crt", "0")) != 0;
+    config.left_looking = std::stoi(get("left-looking", "1")) != 0;
+    config.growth_bits = std::stoi(get("growth", "32"));
+    config.left_looking_bytes = size_t(std::stoi(get("ll-mb", "384"))) << 20;
 
     El::gmp::SetPrecision(precision == 0 ? file_precision(positional[0])
                                          : precision);
@@ -217,6 +220,8 @@ namespace
               << method << ", base " << config.base_size << ", guard "
               << config.guard_bits << ", chunk " << config.column_chunk
               << ", crt " << (config.flint_crt ? "flint" : "blas")
+              << ", trsm " << (config.left_looking ? "left-looking" : "recursive")
+              << ", growth " << config.growth_bits
               << std::endl;
 
     Multimodular_Blas_Timings chol_t, trsm_t;
@@ -242,7 +247,8 @@ namespace
         std::cout << "  [base " << t.base_seconds << ", to_int "
                   << t.to_int_seconds << ", blas " << t.blas_seconds
                   << ", from_int " << t.from_int_seconds << "; gemms "
-                  << t.num_gemms << ", primes " << t.max_num_primes << "]";
+                  << t.num_gemms << ", primes " << t.max_num_primes
+                  << ", rescales " << t.num_rescales << "]";
       std::cout << std::endl;
     };
     print_t("cholesky", chol_s, chol_t);
