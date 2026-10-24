@@ -210,6 +210,7 @@ namespace
     config.growth_bits = std::stoi(get("growth", "32"));
     config.left_looking_bytes = size_t(std::stoi(get("ll-mb", "384"))) << 20;
     config.left_looking_max_ratio = std::stod(get("ll-ratio", "2"));
+    config.gemm_A_bytes = size_t(std::stoi(get("gemm-a-mb", "0"))) << 20;
 
     El::gmp::SetPrecision(precision == 0 ? file_precision(positional[0])
                                          : precision);

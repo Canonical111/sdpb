@@ -558,6 +558,25 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
   };
 
   const long bits = El::gmp::Precision() + config.guard_bits;
+
+  // Memory bound on the residues of A: split the rows of C and A
+  if(config.gemm_A_bytes > 0 && m > 16
+     && sizeof(int32_t) * size_t(m) * k * get_context(bits, bits, k).num_primes
+          > config.gemm_A_bytes)
+    {
+      const int m1 = m / 2;
+      auto C1 = C(El::IR(0, m1), El::ALL);
+      auto C2 = C(El::IR(m1, m), El::ALL);
+      std::vector<int> row_start2(n);
+      for(int j = 0; j < n; ++j)
+        row_start2[j] = std::max(0, row_start[j] - m1);
+      multimodular_gemm_sub(C1, A(El::IR(0, m1), El::ALL), orientation_B, B,
+                            row_start, config, timings);
+      multimodular_gemm_sub(C2, A(El::IR(m1, m), El::ALL), orientation_B, B,
+                            row_start2, config, timings);
+      return;
+    }
+
   auto start = Clock::now();
 
   const std::vector<long> row_exp = max_exponents(

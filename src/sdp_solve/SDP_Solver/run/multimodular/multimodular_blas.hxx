@@ -29,6 +29,10 @@ struct Multimodular_Blas_Config
   int guard_bits = 64;
   // Columns of op(B) processed at once (bounds the memory for residues)
   int column_chunk = 256;
+  // If > 0: the residues of A in C -= A op(B) may use at most this memory;
+  // larger A are processed in row blocks (op(B) is then converted once per
+  // block)
+  size_t gemm_A_bytes = 0;
   // Reconstruct products with FLINT's fmpz_multi_CRT_ui (exact, slower)
   // instead of the truncated BLAS CRT. For testing.
   bool flint_crt = false;

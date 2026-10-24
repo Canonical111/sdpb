@@ -66,7 +66,7 @@ namespace
   // SDPB_MULTIMODULAR_GUARD, SDPB_MULTIMODULAR_CHUNK,
   // SDPB_MULTIMODULAR_FLINT_CRT, SDPB_MULTIMODULAR_LEFT_LOOKING,
   // SDPB_MULTIMODULAR_GROWTH, SDPB_MULTIMODULAR_LL_MB,
-  // SDPB_MULTIMODULAR_LL_RATIO set the config.
+  // SDPB_MULTIMODULAR_LL_RATIO, SDPB_MULTIMODULAR_GEMM_A_MB set the config.
   // Blocks smaller than SDPB_MULTIMODULAR_MIN_SIZE (default 2 * base)
   // use the El routines.
   int env_int(const char *name, int default_value)
@@ -88,6 +88,7 @@ namespace
       c.column_chunk = env_int("SDPB_MULTIMODULAR_CHUNK", c.column_chunk);
       c.flint_crt = env_int("SDPB_MULTIMODULAR_FLINT_CRT", 0) != 0;
       c.left_looking = env_int("SDPB_MULTIMODULAR_LEFT_LOOKING", 1) != 0;
+      c.gemm_A_bytes = size_t(env_int("SDPB_MULTIMODULAR_GEMM_A_MB", 0)) << 20;
       if(const char *ratio = std::getenv("SDPB_MULTIMODULAR_LL_RATIO"))
         c.left_looking_max_ratio = std::atof(ratio);
       c.growth_bits = env_int("SDPB_MULTIMODULAR_GROWTH", c.growth_bits);
@@ -110,6 +111,27 @@ namespace
   {
     static const int result = env_int("SDPB_MULTIMODULAR_DIST_MIN", 256);
     return result;
+  }
+
+  // Allgather a [STAR,VR] matrix M in 64-column panels (small transient
+  // buffers) and call f(i, j, M(i,j)) on every rank; if lower, only i >= j.
+  template <class F>
+  void allgather_columns(
+    const El::DistMatrix<El::BigFloat, El::STAR, El::VR> &M, bool lower,
+    const F &f)
+  {
+    const int height = M.Height(), width = M.Width();
+    const int panel = 64;
+    for(int j0 = 0; j0 < width; j0 += panel)
+      {
+        const int j1 = std::min(width, j0 + panel);
+        const int r0 = lower ? std::min(j0, height) : 0;
+        El::DistMatrix<El::BigFloat, El::STAR, El::STAR> part(
+          M(El::IR(r0, height), El::IR(j0, j1)));
+        for(int j = j0; j < j1; ++j)
+          for(int i = lower ? j : 0; i < height; ++i)
+            f(i, j, part.GetLocalCRef(i - r0, j - j0));
+      }
   }
 
   // Cholesky (lower, in place) of the n x n matrix A, a view of a matrix
@@ -153,10 +175,10 @@ namespace
             local.Set(i, jLoc, A21.CRef(j, i));
         }
       multimodular_trsm_left_lower(A11, local, config, timings);
-      El::DistMatrix<El::BigFloat, El::STAR, El::STAR> L21_T_all(L21_T);
-      for(int j = 0; j < n2; ++j)
-        for(int i = 0; i < n1; ++i)
-          A21.Set(j, i, L21_T_all.GetLocalCRef(i, j));
+      allgather_columns(L21_T, false,
+                        [&](int i, int j, const El::BigFloat &value) {
+                          A21.Set(j, i, value);
+                        });
     }
 
     // A22 -= L21 L21^T, lower triangle
@@ -178,10 +200,10 @@ namespace
         }
       multimodular_gemm_sub(local, A21, El::TRANSPOSE, L21_rows, row_start,
                             config, timings);
-      El::DistMatrix<El::BigFloat, El::STAR, El::STAR> A22_all(A22_columns);
-      for(int j = 0; j < n2; ++j)
-        for(int i = j; i < n2; ++i)
-          A22.Set(i, j, A22_all.GetLocalCRef(i, j));
+      allgather_columns(A22_columns, true,
+                        [&](int i, int j, const El::BigFloat &value) {
+                          A22.Set(i, j, value);
+                        });
     }
 
     distributed_multimodular_cholesky(A22, grid);
