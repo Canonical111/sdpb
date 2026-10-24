@@ -46,7 +46,7 @@ divisions and square roots, and those stay in BigFloat.
 
 ## In SDPB (`compute_Q.cxx`)
 
-A block of size ≥ 64 lives on a grid of g ranks.
+A block lives on a grid of g ranks (by default every block takes this path).
 - Its lower triangle is held once per node, in an MPI-3 shared-memory window (`Shared_Lower_Matrix`). Each rank
   has its own El::Matrix of mpf structs pointing into the window. Headers (size, exponent) are synced after
   each write phase.
@@ -65,7 +65,7 @@ triangle instead, filled by panel allgathers.
 |---|---|---|
 | `SDPB_MULTIMODULAR_TRSM` | 0 | 1 enables the multimodular path |
 | `SDPB_MULTIMODULAR_BASE` | 32 | diagonal block size in BigFloat; panel height of the left-looking Trsm |
-| `SDPB_MULTIMODULAR_MIN_SIZE` | 2·base | smaller blocks use El |
+| `SDPB_MULTIMODULAR_MIN_SIZE` | 1 | smaller blocks use El (default: none; below `base` the path is the BigFloat substitution, still ~2x faster than El) |
 | `SDPB_MULTIMODULAR_DIST_MIN` | 256 | Cholesky levels of at least this size are split over the grid |
 | `SDPB_MULTIMODULAR_GUARD` | 64 | guard bits of the fixed point |
 | `SDPB_MULTIMODULAR_CHUNK` | 256 | columns of op(B) per batch in the GEMM |

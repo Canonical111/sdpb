@@ -68,8 +68,8 @@ namespace
   // SDPB_MULTIMODULAR_FLINT_CRT, SDPB_MULTIMODULAR_LEFT_LOOKING,
   // SDPB_MULTIMODULAR_GROWTH, SDPB_MULTIMODULAR_LL_MB,
   // SDPB_MULTIMODULAR_LL_RATIO, SDPB_MULTIMODULAR_GEMM_A_MB set the config.
-  // Blocks smaller than SDPB_MULTIMODULAR_MIN_SIZE (default 2 * base)
-  // use the El routines.
+  // Blocks smaller than SDPB_MULTIMODULAR_MIN_SIZE (default 1: none) use
+  // the El routines.
   int env_int(const char *name, int default_value)
   {
     const char *value = std::getenv(name);
@@ -103,8 +103,10 @@ namespace
   }
   int multimodular_min_size()
   {
-    static const int result = env_int("SDPB_MULTIMODULAR_MIN_SIZE",
-                                      2 * multimodular_config().base_size);
+    // Default: every block. Below the base size the path is just the
+    // BigFloat substitution/Cholesky with preallocated temporaries, which is
+    // still ~2x faster than El (measured: 65 x 1834 Trsm 0.49-0.57 vs 1.10 s).
+    static const int result = env_int("SDPB_MULTIMODULAR_MIN_SIZE", 1);
     return result;
   }
 
