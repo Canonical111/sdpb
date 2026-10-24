@@ -4,9 +4,16 @@
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/fmpz/fmpz_mul_blas_util.hxx"
 #include "sdpb_util/assert.hxx"
 
+#include <flint/ulong_extras.h>
+
 #include <cblas.h>
 
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cmath>
+#include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
 #include <vector>
@@ -21,6 +28,25 @@ void Multimodular_Blas_Timings::add(const Multimodular_Blas_Timings &other)
   max_num_primes = std::max(max_num_primes, other.max_num_primes);
 }
 
+// Algorithm of multimodular_gemm_sub(C, A, op(B)):
+//
+// 1. Fixed point: row i of A and column j of op(B) are multiplied by
+//    2^(bits - e), e = binary exponent of their largest entry, and truncated
+//    to integers a_il, b_lj with |a|, |b| < 2^bits.
+// 2. Residues modulo primes p_1..p_n (p < 2^21, p^2 k < 2^53, product M of
+//    the primes > 8 max|c_ij|), computed by BLAS: an integer is split into
+//    24-bit chunks c_t, and |x| mod p = sum_t c_t (2^(24t) mod p) mod p.
+//    The residues of A are multiplied by u_p = (M/p)^-1 mod p (see 4).
+// 3. For each prime, cblas_dgemm of the residue matrices (exact in double).
+// 4. CRT, also by BLAS. With y_p = c u_p mod p in [0, p),
+//      c = sum_p y_p (M/p) - q M,  q = round(sum_p y_p / p),
+//    where q is computed in double (|c|/M < 1/8 leaves room for its error).
+//    M/p is split into 24-bit chunks m_pt; S_t = sum_p y_p m_pt is exact in
+//    double, and one dgemm gives all S_t. Only the chunks t >= t0 are
+//    computed: the dropped low part is < 2^(24 t0 + 53) < 2^(bits - 64),
+//    far below the truncation error of step 1 (~k 2^bits).
+// 5. C_ij -= c_ij 2^(e_i + e_j - 2 bits).
+
 namespace
 {
   using Clock = std::chrono::steady_clock;
@@ -29,54 +55,180 @@ namespace
     return std::chrono::duration<double>(Clock::now() - start).count();
   }
 
-  // Residues of fixed-point integers by BLAS.
-  // An integer |x| < 2^bits is split into T chunks of chunk_bits bits,
-  // |x| = sum_t c_t 2^(chunk_bits t), and then
-  //   |x| mod p_i = (sum_t c_t W_ti) mod p_i,  W_ti = 2^(chunk_bits t) mod p_i.
-  // The sum is exact in double: T * 2^chunk_bits * p_i < 2^53.
-  // For n integers this is one (n x T) * (T x num_primes) dgemm.
+  struct Debug_Timers
+  {
+    double chunks = 0, gemm = 0, mod = 0;
+    ~Debug_Timers()
+    {
+      if(std::getenv("MM_DEBUG_TIMING"))
+        fprintf(stderr, "residues: chunks %.3f gemm %.3f mod %.3f\n", chunks,
+                gemm, mod);
+    }
+  } debug_timers;
   constexpr int chunk_bits = 24;
+  constexpr mp_limb_t chunk_mask = (mp_limb_t(1) << chunk_bits) - 1;
 
+  // v - round(v/p) p, in [-(p+1)/2, (p+1)/2], for an integer-valued double
+  // |v| < 2^52. Branch-free (rounding by the 1.5*2^52 trick) so that the
+  // loops below vectorize.
+  inline double round_mod(double v, double p, double inv_p)
+  {
+    constexpr double magic = 6755399441055744.0; // 1.5 * 2^52
+    const double q = (v * inv_p + magic) - magic;
+    return v - q * p;
+  }
+  // v mod p in [0, p)
+  inline double mod_p(double v, double p, double inv_p)
+  {
+    const double r = round_mod(v, p, inv_p);
+    return r + ((r < 0) ? p : 0.0);
+  }
+
+  // Chunks [chunk_bits t, chunk_bits (t+1)) of the integer
+  // y = trunc(|x| * 2^shift) < 2^(chunk_bits num_chunks), times the sign of x,
+  // for t = 0..num_chunks-1 (written with stride). buffer: scratch space of
+  // at least chunk_bits * num_chunks / 64 + 2 limbs.
+  void write_chunks(const __mpf_struct *x, long shift, int num_chunks,
+                    double *chunks, size_t stride, std::vector<mp_limb_t> &buffer)
+  {
+    const long size = std::abs(x->_mp_size);
+    const mp_limb_t *d = x->_mp_d;
+    const double sign = x->_mp_size < 0 ? -1.0 : 1.0;
+    const long num_limbs = long(chunk_bits) * num_chunks / GMP_NUMB_BITS + 2;
+    std::fill(buffer.begin(), buffer.begin() + num_limbs, 0);
+    // bit position in y of bit 0 of d[0]
+    const long offset = long(GMP_NUMB_BITS) * (x->_mp_exp - size) + shift;
+    if(offset >= 0)
+      {
+        const long ls = offset / GMP_NUMB_BITS;
+        const unsigned bs = offset % GMP_NUMB_BITS;
+        ASSERT(ls + size + 1 <= num_limbs, "fixed-point overflow");
+        if(bs == 0)
+          std::copy(d, d + size, buffer.data() + ls);
+        else
+          buffer[ls + size] = mpn_lshift(buffer.data() + ls, d, size, bs);
+      }
+    else
+      {
+        const long ld = (-offset) / GMP_NUMB_BITS;
+        const unsigned bs = (-offset) % GMP_NUMB_BITS;
+        if(ld < size)
+          {
+            ASSERT(size - ld <= num_limbs, "fixed-point overflow");
+            if(bs == 0)
+              std::copy(d + ld, d + size, buffer.data());
+            else
+              mpn_rshift(buffer.data(), d + ld, size - ld, bs);
+          }
+      }
+    // little-endian limbs: chunk t is the 24 bits at byte 3t
+    static_assert(chunk_bits == 24, "byte extraction assumes 24-bit chunks");
+    const unsigned char *bytes
+      = reinterpret_cast<const unsigned char *>(buffer.data());
+    for(int t = 0; t < num_chunks; ++t)
+      {
+        uint32_t v;
+        std::memcpy(&v, bytes + 3 * t, sizeof(v));
+        chunks[t * stride] = sign * double(v & 0xFFFFFFu);
+      }
+  }
+
+  // Everything that depends only on (bits, k)
   struct Residue_Context
   {
-    Fmpz_Comb comb; // primes and CRT
-    int num_chunks;
+    Fmpz_Comb comb; // primes; FLINT CRT for config.flint_crt
+    size_t num_primes;
     std::vector<double> primes, inverse_primes;
-    std::vector<double> W; // num_chunks x num_primes, column-major
+    std::vector<double> u; // (M/p)^-1 mod p
+    // residues: |x| < 2^bits in num_chunks chunks; W = 2^(24t) mod p,
+    // num_chunks x num_primes, column-major
+    int num_chunks;
+    std::vector<double> W;
+    // CRT: chunks t0..t0+num_high_chunks-1 of M/p,
+    // num_primes x num_high_chunks, column-major
+    int t0, num_high_chunks;
+    std::vector<double> M_chunks;
+    // floor(q M / 2^(24 t0)), q = 0..num_primes, num_limbs limbs each
+    int num_limbs;
+    std::vector<mp_limb_t> qM;
 
-    Residue_Context(flint_bitcnt_t bits, slong k)
-        : comb(bits, bits, 1, k),
+    // Product bound: |c| < k 2^(2 bits) < 2^(2 bits + bits(k)); 3 more
+    // bits make |c|/M < 1/8 for the rounding of q.
+    Residue_Context(long bits, slong k)
+        : comb(2 * bits + FLINT_BIT_COUNT(k) + 3, k),
+          num_primes(comb.num_primes),
           num_chunks((bits + chunk_bits - 1) / chunk_bits)
     {
-      const size_t num_primes = comb.num_primes;
       primes.resize(num_primes);
       inverse_primes.resize(num_primes);
+      u.resize(num_primes);
       W.resize(size_t(num_chunks) * num_primes);
+
+      fmpz_t M, M_p;
+      fmpz_init_set_ui(M, 1);
+      fmpz_init(M_p);
+      for(size_t i = 0; i < num_primes; ++i)
+        fmpz_mul_ui(M, M, comb.primes[i]);
+
+      t0 = std::max<long>(0, (bits - 117) / chunk_bits);
+      const long M_bits = fmpz_bits(M);
+      num_high_chunks = (M_bits + chunk_bits - 1) / chunk_bits - t0;
+      M_chunks.resize(num_primes * num_high_chunks);
+      // S_high < num_primes * 2^53 * 2^(24 num_high_chunks)
+      num_limbs = (chunk_bits * num_high_chunks + 64 + 8) / GMP_NUMB_BITS + 2;
+
+      mpz_t z;
+      mpz_init(z);
       for(size_t i = 0; i < num_primes; ++i)
         {
-          const mp_limb_t p = comb.primes.at(i);
+          const mp_limb_t p = comb.primes[i];
           ASSERT(std::ldexp(double(p) * num_chunks, chunk_bits)
-                   < std::ldexp(1.0, 53),
-                 "chunked residues would not be exact: p=", p,
-                 " num_chunks=", num_chunks);
+                     < std::ldexp(1.0, 53)
+                   && std::ldexp(double(p) * num_primes, chunk_bits)
+                        < std::ldexp(1.0, 53),
+                 "chunked residues/CRT would not be exact: p=", p,
+                 " num_chunks=", num_chunks, " num_primes=", num_primes);
           primes[i] = p;
           inverse_primes[i] = 1.0 / double(p);
-          mp_limb_t power = 1; // 2^(chunk_bits t) mod p
+          mp_limb_t power = 1;
           const mp_limb_t base = (mp_limb_t(1) << chunk_bits) % p;
           for(int t = 0; t < num_chunks; ++t)
             {
               W[t + size_t(num_chunks) * i] = double(power);
               power = (power * base) % p;
             }
+          fmpz_divexact_ui(M_p, M, p);
+          u[i] = double(n_invmod(fmpz_fdiv_ui(M_p, p), p));
+          fmpz_get_mpz(z, M_p);
+          for(int t = 0; t < num_high_chunks; ++t)
+            {
+              // bits [24 (t0+t), 24 (t0+t+1)) of M/p
+              mp_limb_t chunk = 0;
+              for(int b = 0; b < chunk_bits; ++b)
+                chunk |= mp_limb_t(mpz_tstbit(z, chunk_bits * (t0 + t) + b))
+                         << b;
+              M_chunks[i + num_primes * t] = double(chunk);
+            }
         }
+      qM.assign((num_primes + 1) * num_limbs, 0);
+      for(size_t q = 0; q <= num_primes; ++q)
+        {
+          fmpz_get_mpz(z, M);
+          mpz_mul_ui(z, z, q);
+          mpz_fdiv_q_2exp(z, z, chunk_bits * t0);
+          ASSERT(mpz_size(z) <= size_t(num_limbs));
+          for(size_t l = 0; l < mpz_size(z); ++l)
+            qM[q * num_limbs + l] = mpz_getlimbn(z, l);
+        }
+      mpz_clear(z);
+      fmpz_clear(M_p);
+      fmpz_clear(M);
     }
   };
 
-  // Primes and CRT data depend only on (bits, k); build them once.
-  Residue_Context &get_context(flint_bitcnt_t bits, slong k)
+  Residue_Context &get_context(long bits, slong k)
   {
-    static std::map<std::pair<flint_bitcnt_t, slong>,
-                    std::unique_ptr<Residue_Context>>
+    static std::map<std::pair<long, slong>, std::unique_ptr<Residue_Context>>
       cache;
     auto &context = cache[{bits, k}];
     if(!context)
@@ -94,92 +246,103 @@ namespace
     return true;
   }
 
-  // Chunks of trunc(|x| * 2^shift), x an mpf:
-  // chunks[t * stride] = bits [chunk_bits t, chunk_bits (t+1)) of it.
-  // Returns the sign of x.
-  int write_chunks(const __mpf_struct *x, long shift, int num_chunks,
-                   double *chunks, size_t stride)
-  {
-    const int size = std::abs(x->_mp_size);
-    const mp_limb_t *d = x->_mp_d;
-    // bit position (in the integer) of bit 0 of limb 0
-    const long offset = long(GMP_NUMB_BITS) * (x->_mp_exp - size) + shift;
-    constexpr mp_limb_t mask = (mp_limb_t(1) << chunk_bits) - 1;
-    for(int t = 0; t < num_chunks; ++t)
-      {
-        // bit position q in the mantissa limbs of bit chunk_bits*t
-        const long q = long(chunk_bits) * t - offset;
-        mp_limb_t value = 0;
-        if(q + chunk_bits > 0 && q < long(GMP_NUMB_BITS) * size)
-          {
-            if(q < 0)
-              value = d[0] << (-q);
-            else
-              {
-                const long li = q / GMP_NUMB_BITS;
-                const int bo = q % GMP_NUMB_BITS;
-                value = d[li] >> bo;
-                if(bo > GMP_NUMB_BITS - chunk_bits && li + 1 < size)
-                  value |= d[li + 1] << (GMP_NUMB_BITS - bo);
-              }
-          }
-        chunks[t * stride] = double(value & mask);
-      }
-    return x->_mp_size < 0 ? -1 : 1;
-  }
-
   // Residues of n fixed-point integers trunc(x_e * 2^shift_e):
-  // out[e + n * i] = residue modulo prime i in (-p_i/2, p_i/2).
+  // out[e + n * i] = residue modulo prime i in [-(p_i+1)/2, (p_i+1)/2],
+  // multiplied by u_i if multiply_by_u.
   // element(e, shift) returns x_e (nullptr for zero) and sets shift.
   template <class Element>
   void compute_residues(const Residue_Context &context, size_t n,
-                        const Element &element, double *out)
+                        const Element &element, bool multiply_by_u,
+                        double *out)
   {
-    const size_t num_primes = context.primes.size();
+    const size_t num_primes = context.num_primes;
     const int T = context.num_chunks;
-    constexpr size_t batch = 4096;
+    constexpr size_t batch = 2048;
     std::vector<double> chunks(batch * T);
-    std::vector<int8_t> signs(batch);
+    std::vector<mp_limb_t> buffer(chunk_bits * T / GMP_NUMB_BITS + 2);
     for(size_t e0 = 0; e0 < n; e0 += batch)
       {
         const size_t nb = std::min(batch, n - e0);
+        auto t_start = Clock::now();
         for(size_t e = 0; e < nb; ++e)
           {
             long shift;
             const __mpf_struct *x = element(e0 + e, shift);
             if(x == nullptr || x->_mp_size == 0)
               {
-                signs[e] = 0;
                 for(int t = 0; t < T; ++t)
                   chunks[e + t * nb] = 0;
               }
             else
-              signs[e] = write_chunks(x, shift, T, chunks.data() + e, nb);
+              write_chunks(x, shift, T, chunks.data() + e, nb, buffer);
           }
+        debug_timers.chunks += seconds_since(t_start);
+        t_start = Clock::now();
+        // |sum| < T 2^24 p < 2^53
         cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, nb,
                     num_primes, T, 1.0, chunks.data(), nb, context.W.data(),
                     T, 0.0, out + e0, n);
+        debug_timers.gemm += seconds_since(t_start);
+        t_start = Clock::now();
         for(size_t i = 0; i < num_primes; ++i)
           {
             const double p = context.primes[i];
             const double inv_p = context.inverse_primes[i];
-            const double half_p = 0.5 * p;
-            double *r = out + e0 + n * i;
-            for(size_t e = 0; e < nb; ++e)
+            double *__restrict r = out + e0 + n * i;
+            if(multiply_by_u)
               {
-                // y mod p in [0, p), exact: y < 2^53
-                const double y = r[e];
-                double v = y - p * std::floor(y * inv_p);
-                if(v < 0)
-                  v += p;
-                else if(v >= p)
-                  v -= p;
-                if(v > half_p)
-                  v -= p;
-                r[e] = signs[e] < 0 ? -v : v;
+                const double u = context.u[i];
+                for(size_t e = 0; e < nb; ++e)
+                  r[e] = round_mod(round_mod(r[e], p, inv_p) * u, p, inv_p);
+              }
+            else
+              {
+                for(size_t e = 0; e < nb; ++e)
+                  r[e] = round_mod(r[e], p, inv_p);
               }
           }
+        debug_timers.mod += seconds_since(t_start);
       }
+  }
+
+  // c = sum_t S_t 2^(24 t) - q_M, two's complement in acc[0..num_limbs).
+  // Returns the sign and sets n = number of significant limbs of |c|.
+  int assemble(const Residue_Context &context, const double *S, size_t stride,
+               const mp_limb_t *q_M, mp_limb_t *acc, int &n)
+  {
+    const int L = context.num_limbs;
+    for(int l = 0; l < L; ++l)
+      acc[l] = 0;
+    for(int t = 0; t < context.num_high_chunks; ++t)
+      {
+        const mp_limb_t v = mp_limb_t(S[t * stride]);
+        const int o = chunk_bits * t;
+        int li = o / GMP_NUMB_BITS;
+        const int sh = o % GMP_NUMB_BITS;
+        mp_limb_t lo = v << sh;
+        mp_limb_t hi = sh == 0 ? 0 : v >> (GMP_NUMB_BITS - sh);
+        mp_limb_t old = acc[li];
+        acc[li] += lo;
+        mp_limb_t carry = hi + (acc[li] < old);
+        while(carry != 0)
+          {
+            ++li;
+            old = acc[li];
+            acc[li] += carry;
+            carry = acc[li] < old;
+          }
+      }
+    mpn_sub_n(acc, acc, q_M, L);
+    int sign = 1;
+    if(acc[L - 1] >> (GMP_NUMB_BITS - 1))
+      {
+        sign = -1;
+        mpn_neg(acc, acc, L);
+      }
+    n = L;
+    while(n > 0 && acc[n - 1] == 0)
+      --n;
+    return sign;
   }
 }
 
@@ -209,7 +372,7 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
   auto start = Clock::now();
 
   // Row exponents of A and column exponents of op(B).
-  // Zero rows/columns get the flag false and are skipped.
+  // Zero rows/columns are skipped.
   constexpr long no_exponent = std::numeric_limits<long>::min();
   std::vector<long> row_exp(m, no_exponent), col_exp(n, no_exponent);
   for(int l = 0; l < k; ++l)
@@ -227,16 +390,15 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
           col_exp[j] = std::max(col_exp[j], e);
       }
 
-  Residue_Context &context = get_context(bits, k);
-  Fmpz_Comb &comb = context.comb;
-  const size_t num_primes = comb.num_primes;
+  const Residue_Context &context = get_context(bits, k);
+  Fmpz_Comb &comb = const_cast<Fmpz_Comb &>(context.comb);
+  const size_t num_primes = context.num_primes;
   timings.max_num_primes = std::max(timings.max_num_primes, num_primes);
   ++timings.num_gemms;
+  const bool blas_crt = !config.flint_crt;
 
-  fmpz_t z;
-  fmpz_init(z);
-
-  // Residues of A: for prime p, an m x k column-major matrix at p*m*k
+  // Residues of A (times u_p for the BLAS CRT):
+  // for prime p, an m x k column-major matrix at p*m*k
   const size_t A_stride = size_t(m) * k;
   std::vector<double> A_residues(num_primes * A_stride);
   compute_residues(
@@ -248,13 +410,22 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
       shift = bits - row_exp[i];
       return A.CRef(i, l).gmp_float.get_mpf_t();
     },
-    A_residues.data());
+    blas_crt, A_residues.data());
   timings.to_int_seconds += seconds_since(start);
 
   const int chunk = std::max(1, std::min(config.column_chunk, n));
   std::vector<double> B_residues(num_primes * size_t(k) * chunk);
   std::vector<double> C_residues(num_primes * size_t(m) * chunk);
+  std::vector<double> quotients, S_high;
+  if(blas_crt)
+    {
+      quotients.resize(size_t(m) * chunk);
+      S_high.resize(size_t(m) * chunk * context.num_high_chunks);
+    }
   std::vector<mp_limb_t> crt_input(num_primes);
+  std::vector<mp_limb_t> acc(context.num_limbs);
+  fmpz_t z;
+  fmpz_init(z);
   mpf_t value;
   mpf_init2(value, El::gmp::Precision());
 
@@ -274,7 +445,7 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
           shift = bits - col_exp[j];
           return op_B(l, j).gmp_float.get_mpf_t();
         },
-        B_residues.data());
+        false, B_residues.data());
       timings.to_int_seconds += seconds_since(start);
 
       start = Clock::now();
@@ -288,6 +459,29 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
       timings.blas_seconds += seconds_since(start);
 
       start = Clock::now();
+      if(blas_crt)
+        {
+          // y_p = (u_p c mod p) in [0, p); q = round(sum_p y_p / p)
+          std::fill(quotients.begin(), quotients.begin() + C_stride, 0.0);
+          for(size_t p = 0; p < num_primes; ++p)
+            {
+              const double prime = context.primes[p];
+              const double inv_p = context.inverse_primes[p];
+              double *__restrict y = C_residues.data() + p * C_stride;
+              double *__restrict q = quotients.data();
+              for(size_t e = 0; e < C_stride; ++e)
+                {
+                  const double r = mod_p(y[e], prime, inv_p);
+                  y[e] = r;
+                  q[e] += r * inv_p;
+                }
+            }
+          // S_t = sum_p y_p m_pt
+          cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, C_stride,
+                      context.num_high_chunks, num_primes, 1.0,
+                      C_residues.data(), C_stride, context.M_chunks.data(),
+                      num_primes, 0.0, S_high.data(), C_stride);
+        }
       for(int jj = 0; jj < width; ++jj)
         {
           const int j = j0 + jj;
@@ -297,22 +491,44 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
             {
               if(row_exp[i] == no_exponent)
                 continue;
-              const double *in = C_residues.data() + i + size_t(jj) * m;
-              for(size_t p = 0; p < num_primes; ++p)
+              const size_t e = i + size_t(jj) * m;
+              long shift = row_exp[i] + col_exp[j] - 2 * bits;
+              if(blas_crt)
                 {
-                  const double d = in[p * C_stride];
-                  crt_input[p] = double_to_uint32_t_residue(d, comb.mods[p]);
+                  const size_t q = std::lround(quotients[e]);
+                  int size;
+                  const int sign = assemble(
+                    context, S_high.data() + e, C_stride,
+                    context.qM.data() + q * context.num_limbs, acc.data(),
+                    size);
+                  if(size == 0)
+                    continue;
+                  __mpf_struct view;
+                  view._mp_prec = size;
+                  view._mp_size = sign * size;
+                  view._mp_exp = size;
+                  view._mp_d = acc.data();
+                  shift += chunk_bits * context.t0;
+                  if(shift >= 0)
+                    mpf_mul_2exp(value, &view, shift);
+                  else
+                    mpf_div_2exp(value, &view, -shift);
                 }
-              fmpz_multi_CRT_ui(z, crt_input.data(), comb.comb,
-                                comb.comb_temp, 1);
-              if(fmpz_is_zero(z))
-                continue;
-              fmpz_get_mpf(value, z);
-              const long shift = row_exp[i] + col_exp[j] - 2 * bits;
-              if(shift >= 0)
-                mpf_mul_2exp(value, value, shift);
               else
-                mpf_div_2exp(value, value, -shift);
+                {
+                  for(size_t p = 0; p < num_primes; ++p)
+                    crt_input[p] = double_to_uint32_t_residue(
+                      C_residues[e + p * C_stride], comb.mods[p]);
+                  fmpz_multi_CRT_ui(z, crt_input.data(), comb.comb,
+                                    comb.comb_temp, 1);
+                  if(fmpz_is_zero(z))
+                    continue;
+                  fmpz_get_mpf(value, z);
+                  if(shift >= 0)
+                    mpf_mul_2exp(value, value, shift);
+                  else
+                    mpf_div_2exp(value, value, -shift);
+                }
               auto &c = C.Ref(i, j).gmp_float;
               mpf_sub(c.get_mpf_t(), c.get_mpf_t(), value);
             }

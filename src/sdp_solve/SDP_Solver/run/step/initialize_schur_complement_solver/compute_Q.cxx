@@ -2,6 +2,7 @@
 #include "sdp_solve/SDP.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/Matrix_Normalizer.hxx"
+#include "sdp_solve/SDP_Solver/run/multimodular/multimodular_blas.hxx"
 #include "sdp_solve/memory_estimates.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
@@ -55,6 +56,88 @@ namespace
     dump_matrix(schur, std::string(dir_env) + "/schur_" + suffix);
     dump_matrix(B, std::string(dir_env) + "/B_" + suffix);
   }
+
+  // Multimodular per-block Cholesky and Trsm (lab #145), enabled by
+  // SDPB_MULTIMODULAR_TRSM=1. Optional SDPB_MULTIMODULAR_BASE,
+  // SDPB_MULTIMODULAR_GUARD, SDPB_MULTIMODULAR_CHUNK,
+  // SDPB_MULTIMODULAR_FLINT_CRT set the config.
+  // Blocks smaller than SDPB_MULTIMODULAR_MIN_SIZE (default 2 * base)
+  // use the El routines.
+  int env_int(const char *name, int default_value)
+  {
+    const char *value = std::getenv(name);
+    return value == nullptr ? default_value : std::atoi(value);
+  }
+  bool use_multimodular_trsm()
+  {
+    static const bool result = env_int("SDPB_MULTIMODULAR_TRSM", 0) != 0;
+    return result;
+  }
+  const Multimodular_Blas_Config &multimodular_config()
+  {
+    static const Multimodular_Blas_Config config = [] {
+      Multimodular_Blas_Config c;
+      c.base_size = env_int("SDPB_MULTIMODULAR_BASE", c.base_size);
+      c.guard_bits = env_int("SDPB_MULTIMODULAR_GUARD", c.guard_bits);
+      c.column_chunk = env_int("SDPB_MULTIMODULAR_CHUNK", c.column_chunk);
+      c.flint_crt = env_int("SDPB_MULTIMODULAR_FLINT_CRT", 0) != 0;
+      return c;
+    }();
+    return config;
+  }
+  int multimodular_min_size()
+  {
+    static const int result = env_int("SDPB_MULTIMODULAR_MIN_SIZE",
+                                      2 * multimodular_config().base_size);
+    return result;
+  }
+
+  // Every rank of the block's grid gets the whole Schur block and computes
+  // its Cholesky factor L (redundantly, no communication), then writes its
+  // own entries of the distributed factor.
+  // As El::Cholesky, the strictly upper triangle keeps the input values.
+  void multimodular_cholesky(
+    const El::DistMatrix<El::BigFloat> &schur,
+    El::DistMatrix<El::BigFloat> &cholesky,
+    El::DistMatrix<El::BigFloat, El::STAR, El::STAR> &L, Timers &timers)
+  {
+    {
+      Scoped_Timer timer(timers, "allgather");
+      L = schur;
+    }
+    {
+      Scoped_Timer timer(timers, "multimodular");
+      Multimodular_Blas_Timings timings;
+      multimodular_cholesky_lower(L.Matrix(), multimodular_config(), timings);
+    }
+    Scoped_Timer timer(timers, "set_local");
+    cholesky = schur;
+    for(int jLoc = 0; jLoc < cholesky.LocalWidth(); ++jLoc)
+      for(int iLoc = 0; iLoc < cholesky.LocalHeight(); ++iLoc)
+        cholesky.SetLocal(
+          iLoc, jLoc,
+          L.GetLocalCRef(cholesky.GlobalRow(iLoc), cholesky.GlobalCol(jLoc)));
+  }
+
+  // B := L^{-1} B. The columns of B are split among the ranks of the grid
+  // ([STAR,VR] distribution); each rank solves for its own columns with
+  // its full copy of L.
+  void
+  multimodular_solve(const El::DistMatrix<El::BigFloat, El::STAR, El::STAR> &L,
+                     El::DistMatrix<El::BigFloat> &B, Timers &timers)
+  {
+    Scoped_Timer to_columns_timer(timers, "to_columns");
+    El::DistMatrix<El::BigFloat, El::STAR, El::VR> B_columns(B);
+    to_columns_timer.stop();
+    {
+      Scoped_Timer timer(timers, "multimodular");
+      Multimodular_Blas_Timings timings;
+      multimodular_trsm_left_lower(L.LockedMatrix(), B_columns.Matrix(),
+                                   multimodular_config(), timings);
+    }
+    Scoped_Timer timer(timers, "from_columns");
+    B = B_columns;
+  }
 }
 
 // schur_off_diagonal = L^{-1} B
@@ -75,18 +158,31 @@ void initialize_schur_off_diagonal(
     {
       const auto global_block_index = block_info.block_indices.at(block);
       auto block_index_string = std::to_string(global_block_index);
+      const bool use_multimodular
+        = use_multimodular_trsm()
+          && schur_complement.blocks[block].Height() >= multimodular_min_size();
+      El::DistMatrix<El::BigFloat, El::STAR, El::STAR> L_full(
+        schur_complement.blocks[block].Grid());
       {
         maybe_dump_block(schur_complement.blocks[block],
                          sdp.free_var_matrix.blocks[block], global_block_index,
                          iteration);
         Scoped_Timer cholesky_timer(timers, "cholesky_" + block_index_string);
-        schur_complement_cholesky.blocks[block]
-          = schur_complement.blocks[block];
-
         try
           {
-            Cholesky(El::UpperOrLowerNS::LOWER,
-                     schur_complement_cholesky.blocks[block]);
+            if(use_multimodular)
+              {
+                multimodular_cholesky(schur_complement.blocks[block],
+                                      schur_complement_cholesky.blocks[block],
+                                      L_full, timers);
+              }
+            else
+              {
+                schur_complement_cholesky.blocks[block]
+                  = schur_complement.blocks[block];
+                Cholesky(El::UpperOrLowerNS::LOWER,
+                         schur_complement_cholesky.blocks[block]);
+              }
           }
         catch(std::exception &e)
           {
@@ -102,10 +198,18 @@ void initialize_schur_off_diagonal(
       Scoped_Timer solve_timer(timers, "solve_" + block_index_string);
 
       schur_off_diagonal.blocks.push_back(sdp.free_var_matrix.blocks[block]);
-      El::Trsm(El::LeftOrRightNS::LEFT, El::UpperOrLowerNS::LOWER,
-               El::OrientationNS::NORMAL, El::UnitOrNonUnitNS::NON_UNIT,
-               El::BigFloat(1), schur_complement_cholesky.blocks[block],
-               schur_off_diagonal.blocks[block]);
+      if(use_multimodular)
+        {
+          multimodular_solve(L_full, schur_off_diagonal.blocks[block],
+                             timers);
+        }
+      else
+        {
+          El::Trsm(El::LeftOrRightNS::LEFT, El::UpperOrLowerNS::LOWER,
+                   El::OrientationNS::NORMAL, El::UnitOrNonUnitNS::NON_UNIT,
+                   El::BigFloat(1), schur_complement_cholesky.blocks[block],
+                   schur_off_diagonal.blocks[block]);
+        }
       block_timings_ms(global_block_index, 0)
         += solve_timer.elapsed_milliseconds();
     }

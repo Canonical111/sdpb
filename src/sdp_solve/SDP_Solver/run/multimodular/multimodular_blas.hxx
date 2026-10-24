@@ -26,6 +26,9 @@ struct Multimodular_Blas_Config
   int guard_bits = 64;
   // Columns of op(B) processed at once (bounds the memory for residues)
   int column_chunk = 256;
+  // Reconstruct products with FLINT's fmpz_multi_CRT_ui (exact, slower)
+  // instead of the truncated BLAS CRT. For testing.
+  bool flint_crt = false;
 };
 
 struct Multimodular_Blas_Timings

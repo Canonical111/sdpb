@@ -205,6 +205,7 @@ namespace
     config.base_size = std::stoi(get("base", "64"));
     config.guard_bits = std::stoi(get("guard", "64"));
     config.column_chunk = std::stoi(get("chunk", "256"));
+    config.flint_crt = std::stoi(get("flint-crt", "0")) != 0;
 
     El::gmp::SetPrecision(precision == 0 ? file_precision(positional[0])
                                          : precision);
@@ -215,6 +216,7 @@ namespace
               << ", precision " << El::gmp::Precision() << ", method "
               << method << ", base " << config.base_size << ", guard "
               << config.guard_bits << ", chunk " << config.column_chunk
+              << ", crt " << (config.flint_crt ? "flint" : "blas")
               << std::endl;
 
     Multimodular_Blas_Timings chol_t, trsm_t;
