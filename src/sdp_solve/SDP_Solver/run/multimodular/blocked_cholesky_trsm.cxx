@@ -3,6 +3,7 @@
 #include "sdpb_util/assert.hxx"
 
 #include <chrono>
+#include <vector>
 
 namespace
 {
@@ -10,6 +11,39 @@ namespace
   double seconds_since(const Clock::time_point &start)
   {
     return std::chrono::duration<double>(Clock::now() - start).count();
+  }
+
+  // B := L^{-1} B by forward substitution, column by column, with
+  // preallocated mpf temporaries (El::Trsm on BigFloat allocates a
+  // temporary per multiply-add, which makes it ~2-3x slower).
+  void substitution_trsm(const El::Matrix<El::BigFloat> &L,
+                         El::Matrix<El::BigFloat> &B)
+  {
+    const int n = L.Height();
+    const mp_bitcnt_t precision = El::gmp::Precision();
+    mpf_t t;
+    mpf_init2(t, precision);
+    // 1/L_ii: one division per row instead of one per entry
+    std::vector<El::BigFloat> inverse_diagonal(n);
+    for(int i = 0; i < n; ++i)
+      mpf_ui_div(inverse_diagonal[i].gmp_float.get_mpf_t(), 1,
+                 L.CRef(i, i).gmp_float.get_mpf_t());
+    for(int j = 0; j < B.Width(); ++j)
+      for(int i = 0; i < n; ++i)
+        {
+          mpf_ptr x_i = B.Ref(i, j).gmp_float.get_mpf_t();
+          for(int k = 0; k < i; ++k)
+            {
+              mpf_srcptr l_ik = L.CRef(i, k).gmp_float.get_mpf_t();
+              mpf_srcptr x_k = B.CRef(k, j).gmp_float.get_mpf_t();
+              if(mpf_sgn(l_ik) == 0 || mpf_sgn(x_k) == 0)
+                continue;
+              mpf_mul(t, l_ik, x_k);
+              mpf_sub(x_i, x_i, t);
+            }
+          mpf_mul(x_i, x_i, inverse_diagonal[i].gmp_float.get_mpf_t());
+        }
+    mpf_clear(t);
   }
 }
 
@@ -28,8 +62,7 @@ void multimodular_trsm_left_lower(const El::Matrix<El::BigFloat> &L,
   if(n <= config.base_size)
     {
       auto start = Clock::now();
-      El::Trsm(El::LEFT, El::LOWER, El::NORMAL, El::NON_UNIT,
-               El::BigFloat(1), L, B);
+      substitution_trsm(L, B);
       timings.base_seconds += seconds_since(start);
       return;
     }
