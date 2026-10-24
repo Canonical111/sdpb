@@ -54,7 +54,7 @@ inline Outcome attempt(const Block_Diagonal_Matrix& A,const B& gamma) {
         for(int i=0;i<original.Height();++i)diag[i]=dr.GetLocal(i,0);
         for(int i=0;i<original.Height()-1;++i)off[i]=er.GetLocal(i,0);
         auto result=partitioned(diag,off,bits);
-        if(result.status!="certified") status=result.status=="work-limit"?work_limit:uncertain;
+        if(result.status!="certified") status=result.status=="iteration_limit"?work_limit:uncertain;
         else {
           auto s=step(result,gamma,bits);
           if(!usable(s,bits)) status=width;
