@@ -1,5 +1,6 @@
 #include "SDPA_File_Parse_Result.hxx"
 #include "SDPA_Block_Structure.hxx"
+#include "sdpb_util/Rss_Log.hxx"
 #include "catch2/catch_amalgamated.hpp"
 #include "sdpb_util/assert.hxx"
 
@@ -311,6 +312,7 @@ namespace Sdpb::Sdpa
         El::Zero(zero);
         sdp_blocks_F.at(index).emplace(block_structure.m_dim + 1, zero);
       }
+    rss_log("mark", "parse.zeros_allocated");
 
     const auto accept_sdpa_entry = [&](SDPA_Matrix_Entry &&sdpa_entry) {
       const Result_Matrix_Entry entry(sdpa_entry, block_structure);
@@ -350,12 +352,14 @@ namespace Sdpb::Sdpa
                       ", next line: ", line);
       }
 
+    rss_log("mark", "parse.entries_read");
     for(size_t index = 0; index < sdp_blocks_F.size(); ++index)
       {
         if(!should_parse_block(index))
           continue;
         result.parsed_blocks.emplace(index, sdp_blocks_F.at(index).value());
       }
+    rss_log("mark", "parse.result_copied");
     return result;
   }
 

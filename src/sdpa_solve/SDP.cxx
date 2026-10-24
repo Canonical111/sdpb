@@ -3,6 +3,7 @@
 #include "parse_sdpa/parse_sdpa.hxx"
 #include "sdpb_util/assert.hxx"
 #include "sdpb_util/copy_matrix.hxx"
+#include "sdpb_util/Rss_Log.hxx"
 
 #include <filesystem>
 
@@ -66,6 +67,7 @@ namespace Sdpb::Sdpa
                                       block_info.block_indices, grid);
           }
       }
+      rss_log("mark", "SDP_ctor.F_allocated");
 
       // Synchronize F_0 and F_i blocks
       for(size_t local_block_index = 0;
@@ -92,6 +94,8 @@ namespace Sdpb::Sdpa
 
     Scoped_Timer validate_timer(timers, "validate");
     validate(block_info);
+    validate_timer.stop();
+    rss_log("mark", "SDP_ctor.before_parse_result_release");
   }
 
   size_t SDP::primal_dimension() const

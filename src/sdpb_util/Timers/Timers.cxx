@@ -2,6 +2,7 @@
 
 #include "sdpb_util/Proc_Meminfo.hxx"
 #include "sdpb_util/assert.hxx"
+#include "sdpb_util/Rss_Log.hxx"
 
 namespace
 {
@@ -43,6 +44,7 @@ Timer &Timers::add_and_start(const std::string &name)
   std::string full_name = prefix + name;
 
   process_meminfo(full_name);
+  rss_log("start", full_name);
 
   named_timers.emplace_back(full_name, Timer());
   return named_timers.back().second;

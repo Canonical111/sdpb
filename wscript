@@ -38,6 +38,7 @@ def build(bld):
                       'src/sdpb_util/Memory_Tracker.cxx',
                       'src/sdpb_util/Mesh.cxx',
                       'src/sdpb_util/Proc_Meminfo.cxx',
+                      'src/sdpb_util/Rss_Log.cxx',
                       'src/sdpb_util/bigint_shared_memory/blas_jobs/Blas_Job_Cost.cxx',
                       'src/sdpb_util/bigint_shared_memory/fmpz/Fmpz_BigInt.cxx',
                       'src/sdpb_util/bigint_shared_memory/fmpz/Fmpz_Matrix.cxx',
