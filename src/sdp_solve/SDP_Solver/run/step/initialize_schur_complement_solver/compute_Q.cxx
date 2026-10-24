@@ -559,6 +559,118 @@ namespace
   // B := L^{-1} B. The columns of B are split among the ranks of the grid
   // ([STAR,VR] distribution); each rank solves for its own columns with
   // its full copy of L.
+  // B := L^{-1} B for a grid on one node, through an MPI-3 shared-memory
+  // window holding B (one copy per block): each rank writes the entries of
+  // B it owns ([MC,MR]), solves its columns (j = rank mod g) in place in the
+  // window, and reads back the entries it owns. No [STAR,VR] copy and no El
+  // redistribution buffers. On one rank, B is solved in place.
+  void multimodular_solve_shared(const El::Matrix<El::BigFloat> &L,
+                                 El::DistMatrix<El::BigFloat> &B,
+                                 Timers &timers)
+  {
+    Multimodular_Blas_Timings timings;
+    if(B.Grid().Size() == 1)
+      {
+        Scoped_Timer timer(timers, "multimodular");
+        multimodular_trsm_left_lower(L, B.Matrix(), multimodular_config(),
+                                     timings);
+        return;
+      }
+    struct Header
+    {
+      int size;
+      int pad;
+      long exp;
+    };
+    const int P = B.Height(), N = B.Width();
+    MPI_Comm comm = B.Grid().Comm().comm;
+    int rank, grid_size;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &grid_size);
+    mpf_t probe;
+    mpf_init2(probe, El::gmp::Precision());
+    const int limbs = probe->_mp_prec + 1;
+    mpf_clear(probe);
+    const size_t count = size_t(P) * N;
+    const MPI_Aint bytes
+      = rank == 0 ? count * (sizeof(Header) + limbs * sizeof(mp_limb_t)) : 0;
+    void *base;
+    MPI_Win win;
+    MPI_Win_allocate_shared(bytes, 1, MPI_INFO_NULL, comm, &base, &win);
+    MPI_Aint size;
+    int disp;
+    MPI_Win_shared_query(win, 0, &size, &disp, &base);
+    Header *headers = static_cast<Header *>(base);
+    mp_limb_t *limb_data = reinterpret_cast<mp_limb_t *>(headers + count);
+    MPI_Win_lock_all(MPI_MODE_NOCHECK, win);
+    auto sync = [&] {
+      MPI_Win_sync(win);
+      MPI_Barrier(comm);
+      MPI_Win_sync(win);
+    };
+    auto view = [&](size_t index) {
+      __mpf_struct v;
+      v._mp_prec = limbs - 1;
+      v._mp_size = headers[index].size;
+      v._mp_exp = headers[index].exp;
+      v._mp_d = limb_data + index * limbs;
+      return v;
+    };
+
+    Scoped_Timer to_shared_timer(timers, "to_shared");
+    for(int jLoc = 0; jLoc < B.LocalWidth(); ++jLoc)
+      for(int iLoc = 0; iLoc < B.LocalHeight(); ++iLoc)
+        {
+          const size_t index
+            = B.GlobalRow(iLoc) + size_t(B.GlobalCol(jLoc)) * P;
+          __mpf_struct v = view(index);
+          mpf_set(&v, B.GetLocalCRef(iLoc, jLoc).gmp_float.get_mpf_t());
+          headers[index] = {v._mp_size, 0, v._mp_exp};
+        }
+    sync();
+    to_shared_timer.stop();
+
+    {
+      Scoped_Timer timer(timers, "multimodular");
+      std::vector<int> columns;
+      for(int j = rank; j < N; j += grid_size)
+        columns.push_back(j);
+      const int w = columns.size();
+      // mpf structs of this rank's columns, pointing into the window
+      El::BigFloat *structs = static_cast<El::BigFloat *>(
+        ::operator new(sizeof(El::BigFloat) * std::max<size_t>(1, size_t(P) * w)));
+      for(int jj = 0; jj < w; ++jj)
+        for(int i = 0; i < P; ++i)
+          *structs[i + size_t(jj) * P].gmp_float.get_mpf_t()
+            = view(i + size_t(columns[jj]) * P);
+      {
+        El::Matrix<El::BigFloat> X;
+        X.Attach(P, w, structs, P);
+        multimodular_trsm_left_lower(L, X, multimodular_config(), timings);
+      }
+      for(int jj = 0; jj < w; ++jj)
+        for(int i = 0; i < P; ++i)
+          {
+            const __mpf_struct *s
+              = structs[i + size_t(jj) * P].gmp_float.get_mpf_t();
+            headers[i + size_t(columns[jj]) * P] = {s->_mp_size, 0, s->_mp_exp};
+          }
+      ::operator delete(structs);
+      sync();
+    }
+
+    Scoped_Timer from_shared_timer(timers, "from_shared");
+    for(int jLoc = 0; jLoc < B.LocalWidth(); ++jLoc)
+      for(int iLoc = 0; iLoc < B.LocalHeight(); ++iLoc)
+        {
+          const __mpf_struct v
+            = view(B.GlobalRow(iLoc) + size_t(B.GlobalCol(jLoc)) * P);
+          mpf_set(B.Matrix().Ref(iLoc, jLoc).gmp_float.get_mpf_t(), &v);
+        }
+    MPI_Win_unlock_all(win);
+    MPI_Win_free(&win);
+  }
+
   void multimodular_solve(const El::Matrix<El::BigFloat> &L,
                           El::DistMatrix<El::BigFloat> &B, Timers &timers)
   {
@@ -665,8 +777,12 @@ void initialize_schur_off_diagonal(
       schur_off_diagonal.blocks.push_back(sdp.free_var_matrix.blocks[block]);
       if(use_multimodular)
         {
-          multimodular_solve(L_full, schur_off_diagonal.blocks[block],
-                             timers);
+          if(use_shared)
+            multimodular_solve_shared(L_full, schur_off_diagonal.blocks[block],
+                                      timers);
+          else
+            multimodular_solve(L_full, schur_off_diagonal.blocks[block],
+                               timers);
         }
       else
         {
