@@ -32,7 +32,7 @@ void compute_search_direction(
   const El::BigFloat &mu, const Block_Vector &primal_residue_p,
   const bool &is_corrector_phase, const El::DistMatrix<El::BigFloat> &Q,
   Block_Vector &dx, Block_Diagonal_Matrix &dX, Block_Vector &dy,
-  Block_Diagonal_Matrix &dY);
+  Block_Diagonal_Matrix &dY, Timers &timers);
 
 El::BigFloat predictor_centering_parameter(const Solver_Parameters &parameters,
                                            const bool is_primal_dual_feasible);
@@ -166,21 +166,26 @@ void SDP_Solver::step(
       compute_search_direction(block_info, sdp, *this, minus_XY,
                                schur_complement_cholesky, schur_off_diagonal,
                                X_cholesky, beta_predictor, mu,
-                               primal_residue_p, false, Q, dx, dX, dy, dY);
+                               primal_residue_p, false, Q, dx, dX, dy, dY,
+                               timers);
     }
 
     // Compute the corrector solution for (dx, dX, dy, dY)
     {
       Scoped_Timer corrector_timer(timers,
                                    "computeSearchDirection(betaCorrector)");
-      beta_corrector = corrector_centering_parameter(
-        parameters, X, dX, Y, dY, mu, is_primal_and_dual_feasible,
-        total_psd_rows);
+      {
+        Scoped_Timer beta_timer(timers, "corrector_centering_parameter");
+        beta_corrector = corrector_centering_parameter(
+          parameters, X, dX, Y, dY, mu, is_primal_and_dual_feasible,
+          total_psd_rows);
+      }
 
       compute_search_direction(block_info, sdp, *this, minus_XY,
                                schur_complement_cholesky, schur_off_diagonal,
                                X_cholesky, beta_corrector, mu,
-                               primal_residue_p, true, Q, dx, dX, dy, dY);
+                               primal_residue_p, true, Q, dx, dX, dy, dY,
+                               timers);
     }
 
     // Calculate condition numbers for Cholesky matrices

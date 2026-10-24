@@ -1,4 +1,5 @@
 #include "sdp_solve/SDP_Solver/run/constraint_matrix_weighted_sum.hxx"
+#include "sdpb_util/Timers/Timers.hxx"
 
 // Compute the search direction (dx, dX, dy, dY) for the predictor and
 // corrector phases.
@@ -36,10 +37,11 @@ void compute_schur_RHS(const Block_Info &block_info, const SDP &sdp,
                        const Block_Vector &dual_residues,
                        const Block_Diagonal_Matrix &Z, Block_Vector &dx);
 
-void solve_schur_complement_equation(
+void solve_schur_complement_equation_timed(
   const Block_Diagonal_Matrix &schur_complement_cholesky,
   const Block_Matrix &schur_off_diagonal,
-  const El::DistMatrix<El::BigFloat> &Q, Block_Vector &dx, Block_Vector &dy);
+  const El::DistMatrix<El::BigFloat> &Q, Block_Vector &dx, Block_Vector &dy,
+  Timers &timers);
 
 void compute_search_direction(
   const Block_Info &block_info, const SDP &sdp, const SDP_Solver &solver,
@@ -50,41 +52,51 @@ void compute_search_direction(
   const El::BigFloat &mu, const Block_Vector &primal_residue_p,
   const bool &is_corrector_phase, const El::DistMatrix<El::BigFloat> &Q,
   Block_Vector &dx, Block_Diagonal_Matrix &dX, Block_Vector &dy,
-  Block_Diagonal_Matrix &dY)
+  Block_Diagonal_Matrix &dY, Timers &timers)
 {
   // R = beta mu I - X Y (predictor phase)
   // R = beta mu I - X Y - dX dY (corrector phase)
   Block_Diagonal_Matrix R(minus_XY);
-  if(is_corrector_phase)
-    {
-      scale_multiply_add(El::BigFloat(-1), dX, dY, El::BigFloat(1), R);
-    }
-  R.add_diagonal(beta * mu);
-
-  // Z = Symmetrize(X^{-1} (PrimalResidues Y - R))
   Block_Diagonal_Matrix Z(solver.X);
-  multiply(solver.primal_residues, solver.Y, Z);
-  Z -= R;
-  cholesky_solve(X_cholesky, Z);
-  Z.symmetrize();
+  {
+    Scoped_Timer timer(timers, "R_Z");
+    if(is_corrector_phase)
+      {
+        scale_multiply_add(El::BigFloat(-1), dX, dY, El::BigFloat(1), R);
+      }
+    R.add_diagonal(beta * mu);
 
-  // dx[p] = -dual_residues[p] - Tr(A_p Z)
-  // dy[n] = dualObjective[n] - (FreeVarMatrix^T x)_n
-  compute_schur_RHS(block_info, sdp, solver.dual_residues, Z, dx);
-  dy = primal_residue_p;
+    multiply(solver.primal_residues, solver.Y, Z);
+    Z -= R;
+    cholesky_solve(X_cholesky, Z);
+    Z.symmetrize();
+  }
 
-  // Solve for dx, dy in-place
-  solve_schur_complement_equation(schur_complement_cholesky,
-                                  schur_off_diagonal, Q, dx, dy);
+  {
+    Scoped_Timer timer(timers, "schur_RHS");
+    compute_schur_RHS(block_info, sdp, solver.dual_residues, Z, dx);
+    dy = primal_residue_p;
+  }
 
-  // dX = PrimalResidues + \sum_p A_p dx[p]
-  constraint_matrix_weighted_sum(block_info, sdp, dx, dX);
-  dX += solver.primal_residues;
+  {
+    Scoped_Timer timer(timers, "solve_schur");
+    solve_schur_complement_equation_timed(schur_complement_cholesky,
+                                          schur_off_diagonal, Q, dx, dy,
+                                          timers);
+  }
 
-  // dY = Symmetrize(X^{-1} (R - dX Y))
-  multiply(dX, solver.Y, dY);
-  dY -= R;
-  cholesky_solve(X_cholesky, dY);
-  dY.symmetrize();
-  dY *= El::BigFloat(-1);
+  {
+    Scoped_Timer timer(timers, "dX");
+    constraint_matrix_weighted_sum(block_info, sdp, dx, dX);
+    dX += solver.primal_residues;
+  }
+
+  {
+    Scoped_Timer timer(timers, "dY");
+    multiply(dX, solver.Y, dY);
+    dY -= R;
+    cholesky_solve(X_cholesky, dY);
+    dY.symmetrize();
+    dY *= El::BigFloat(-1);
+  }
 }
