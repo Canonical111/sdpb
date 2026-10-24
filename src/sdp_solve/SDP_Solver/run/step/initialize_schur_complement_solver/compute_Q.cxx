@@ -9,6 +9,7 @@
 #include <boost/noncopyable.hpp>
 
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <fstream>
 #include <iostream>
@@ -238,6 +239,250 @@ namespace
     }
   };
 
+  // Lower triangle of an n x n BigFloat matrix in an MPI-3 shared-memory
+  // window of the block's grid (all its ranks on one node): one copy per
+  // block instead of one per rank. The limbs and the (size, exponent) headers
+  // are shared; each rank has its own El::Matrix of mpf structs whose limb
+  // pointers point into the window (the window may map at different
+  // addresses in different processes). A rank writes elements through its
+  // structs (the limbs go to the window), then publish() copies their
+  // headers to the window; after sync(), pull() refreshes the other ranks'
+  // structs. Strictly upper elements are never used: they point to a dummy
+  // zero.
+  class Shared_Lower_Matrix : boost::noncopyable
+  {
+    struct Header
+    {
+      int size;
+      int pad;
+      long exp;
+    };
+    MPI_Comm comm;
+    MPI_Win win = MPI_WIN_NULL;
+    int n, limbs, rank;
+    size_t count;
+    Header *headers = nullptr;
+    mp_limb_t *limb_data = nullptr;
+    El::BigFloat *structs = nullptr;
+    mp_limb_t dummy[2] = {0, 0};
+
+    size_t index(int i, int j) const
+    {
+      return size_t(j) * n - size_t(j) * (j - 1) / 2 + (i - j);
+    }
+    __mpf_struct *element(int i, int j)
+    {
+      return structs[i + size_t(j) * n].gmp_float.get_mpf_t();
+    }
+
+  public:
+    El::Matrix<El::BigFloat> matrix;
+
+    Shared_Lower_Matrix(int n_, MPI_Comm comm_)
+        : comm(comm_), n(n_), count(size_t(n_) * (n_ + 1) / 2)
+    {
+      static_assert(sizeof(El::BigFloat) == sizeof(__mpf_struct),
+                    "El::BigFloat must be a bare mpf");
+      MPI_Comm_rank(comm, &rank);
+      mpf_t probe;
+      mpf_init2(probe, El::gmp::Precision());
+      limbs = probe->_mp_prec + 1; // mpf writes at most _mp_prec + 1 limbs
+      mpf_clear(probe);
+      const MPI_Aint bytes
+        = rank == 0 ? count * (sizeof(Header) + limbs * sizeof(mp_limb_t))
+                    : 0;
+      void *base;
+      MPI_Win_allocate_shared(bytes, 1, MPI_INFO_NULL, comm, &base, &win);
+      MPI_Aint size;
+      int disp;
+      MPI_Win_shared_query(win, 0, &size, &disp, &base);
+      headers = static_cast<Header *>(base);
+      limb_data = reinterpret_cast<mp_limb_t *>(headers + count);
+      MPI_Win_lock_all(MPI_MODE_NOCHECK, win);
+      if(rank == 0)
+        std::memset(headers, 0, count * sizeof(Header));
+      // mpf structs filled in place (no constructors: limbs live in the
+      // window, so ~BigFloat must never run on them)
+      structs = static_cast<El::BigFloat *>(
+        ::operator new(sizeof(El::BigFloat) * size_t(n) * n));
+      for(int j = 0; j < n; ++j)
+        for(int i = 0; i < n; ++i)
+          {
+            __mpf_struct *s = element(i, j);
+            s->_mp_size = 0;
+            s->_mp_exp = 0;
+            if(i >= j)
+              {
+                s->_mp_prec = limbs - 1;
+                s->_mp_d = limb_data + index(i, j) * limbs;
+              }
+            else
+              {
+                s->_mp_prec = 1;
+                s->_mp_d = dummy;
+              }
+          }
+      matrix.Attach(n, n, structs, n);
+      sync();
+    }
+    ~Shared_Lower_Matrix()
+    {
+      matrix.Empty();
+      ::operator delete(structs);
+      MPI_Win_unlock_all(win);
+      MPI_Win_free(&win);
+    }
+    int Rank() const { return rank; }
+
+    void publish(int i, int j)
+    {
+      const __mpf_struct *s = element(i, j);
+      headers[index(i, j)] = {s->_mp_size, 0, s->_mp_exp};
+    }
+    void pull(int i, int j)
+    {
+      const Header &h = headers[index(i, j)];
+      __mpf_struct *s = element(i, j);
+      s->_mp_size = h.size;
+      s->_mp_exp = h.exp;
+    }
+    // publish/pull the lower part of rows [i0, i1) x columns [j0, j1)
+    void publish(int i0, int i1, int j0, int j1)
+    {
+      for(int j = j0; j < j1; ++j)
+        for(int i = std::max(i0, j); i < i1; ++i)
+          publish(i, j);
+    }
+    void pull(int i0, int i1, int j0, int j1)
+    {
+      for(int j = j0; j < j1; ++j)
+        for(int i = std::max(i0, j); i < i1; ++i)
+          pull(i, j);
+    }
+    void sync()
+    {
+      MPI_Win_sync(win);
+      MPI_Barrier(comm);
+      MPI_Win_sync(win);
+    }
+  };
+
+  // True if all ranks of comm share a node (MPI shared memory works)
+  bool on_one_node(MPI_Comm comm)
+  {
+    MPI_Comm node;
+    MPI_Comm_split_type(comm, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &node);
+    int node_size, size;
+    MPI_Comm_size(node, &node_size);
+    MPI_Comm_size(comm, &size);
+    MPI_Comm_free(&node);
+    return node_size == size;
+  }
+
+  // S := lower triangle of the distributed `schur`: each rank writes the
+  // entries it owns.
+  void fill_shared(const El::DistMatrix<El::BigFloat> &schur,
+                   Shared_Lower_Matrix &S)
+  {
+    const int n = schur.Height();
+    for(int jLoc = 0; jLoc < schur.LocalWidth(); ++jLoc)
+      for(int iLoc = 0; iLoc < schur.LocalHeight(); ++iLoc)
+        {
+          const int i = schur.GlobalRow(iLoc), j = schur.GlobalCol(jLoc);
+          if(i < j)
+            continue;
+          mpf_set(S.matrix.Ref(i, j).gmp_float.get_mpf_t(),
+                  schur.GetLocalCRef(iLoc, jLoc).gmp_float.get_mpf_t());
+          S.publish(i, j);
+        }
+    S.sync();
+    S.pull(0, n, 0, n);
+  }
+
+  // Cholesky of rows/columns [r0, r0+n) of the shared matrix, as
+  // distributed_multimodular_cholesky but writing in place instead of
+  // allgathering. The parts below SDPB_MULTIMODULAR_DIST_MIN are computed by
+  // rank 0 of the grid only.
+  void shared_multimodular_cholesky(Shared_Lower_Matrix &S, int r0, int n,
+                                    int grid_size)
+  {
+    const auto &config = multimodular_config();
+    Multimodular_Blas_Timings timings;
+    const int rank = S.Rank();
+    if(grid_size == 1 || n < multimodular_distributed_min_size())
+      {
+        if(rank == 0)
+          {
+            auto A = S.matrix(El::IR(r0, r0 + n), El::IR(r0, r0 + n));
+            multimodular_cholesky_lower(A, config, timings);
+            S.publish(r0, r0 + n, r0, r0 + n);
+          }
+        S.sync();
+        if(rank != 0)
+          S.pull(r0, r0 + n, r0, r0 + n);
+        return;
+      }
+    const int n1 = n / 2, n2 = n - n1;
+    shared_multimodular_cholesky(S, r0, n1, grid_size);
+    const auto rows1 = El::IR(r0, r0 + n1), rows2 = El::IR(r0 + n1, r0 + n);
+    const auto A11 = S.matrix(rows1, rows1);
+    auto A21 = S.matrix(rows2, rows1);
+    auto A22 = S.matrix(rows2, rows2);
+
+    // This rank's rows j of A21 (j = rank mod grid_size)
+    std::vector<int> mine;
+    for(int j = rank; j < n2; j += grid_size)
+      mine.push_back(j);
+    const int w = mine.size();
+
+    // L21^T = L11^{-1} A21^T for this rank's rows, written in place
+    {
+      El::Matrix<El::BigFloat> T(n1, w);
+      for(int jj = 0; jj < w; ++jj)
+        for(int i = 0; i < n1; ++i)
+          T.Set(i, jj, A21.CRef(mine[jj], i));
+      multimodular_trsm_left_lower(A11, T, config, timings);
+      for(int jj = 0; jj < w; ++jj)
+        for(int i = 0; i < n1; ++i)
+          {
+            A21.Set(mine[jj], i, T.CRef(i, jj));
+            S.publish(r0 + n1 + mine[jj], r0 + i);
+          }
+      S.sync();
+      S.pull(r0 + n1, r0 + n, r0, r0 + n1);
+    }
+
+    // A22 -= L21 L21^T, this rank's columns, lower part, written in place
+    {
+      El::Matrix<El::BigFloat> C(n2, w), L21_rows(w, n1);
+      std::vector<int> row_start(w);
+      for(int jj = 0; jj < w; ++jj)
+        {
+          const int j = mine[jj];
+          row_start[jj] = j;
+          for(int i = j; i < n2; ++i)
+            C.Set(i, jj, A22.CRef(i, j));
+          for(int l = 0; l < n1; ++l)
+            L21_rows.Set(jj, l, A21.CRef(j, l));
+        }
+      multimodular_gemm_sub(C, A21, El::TRANSPOSE, L21_rows, row_start,
+                            config, timings);
+      for(int jj = 0; jj < w; ++jj)
+        {
+          const int j = mine[jj];
+          for(int i = j; i < n2; ++i)
+            {
+              A22.Set(i, j, C.CRef(i, jj));
+              S.publish(r0 + n1 + i, r0 + n1 + j);
+            }
+        }
+      S.sync();
+      S.pull(r0 + n1, r0 + n, r0 + n1, r0 + n);
+    }
+
+    shared_multimodular_cholesky(S, r0 + n1, n2, grid_size);
+  }
+
   // L := the lower triangle of the distributed matrix `schur`, on every rank
   // of its grid. Gathered in column panels, rows j0..n of columns j0..j1 at
   // a time, so the transient buffers stay small and only the lower triangle
@@ -287,6 +532,30 @@ namespace
         }
   }
 
+  void multimodular_cholesky_shared(const El::DistMatrix<El::BigFloat> &schur,
+                                    El::DistMatrix<El::BigFloat> &cholesky,
+                                    Shared_Lower_Matrix &S, Timers &timers)
+  {
+    {
+      Scoped_Timer timer(timers, "fill_shared");
+      fill_shared(schur, S);
+    }
+    {
+      Scoped_Timer timer(timers, "multimodular");
+      shared_multimodular_cholesky(S, 0, schur.Height(),
+                                   schur.Grid().Size());
+    }
+    Scoped_Timer timer(timers, "set_local");
+    cholesky = schur;
+    for(int jLoc = 0; jLoc < cholesky.LocalWidth(); ++jLoc)
+      for(int iLoc = 0; iLoc < cholesky.LocalHeight(); ++iLoc)
+        {
+          const int i = cholesky.GlobalRow(iLoc), j = cholesky.GlobalCol(jLoc);
+          if(i >= j)
+            cholesky.SetLocal(iLoc, jLoc, S.matrix.CRef(i, j));
+        }
+  }
+
   // B := L^{-1} B. The columns of B are split among the ranks of the grid
   // ([STAR,VR] distribution); each rank solves for its own columns with
   // its full copy of L.
@@ -328,13 +597,24 @@ void initialize_schur_off_diagonal(
       const bool use_multimodular
         = use_multimodular_trsm()
           && schur_complement.blocks[block].Height() >= multimodular_min_size();
+      // The block's factor, on every rank of its grid: one shared copy per
+      // node (SDPB_MULTIMODULAR_SHARED=1, default) or one copy per rank.
       std::unique_ptr<Lower_BigFloat_Matrix> L_storage;
-      if(use_multimodular)
+      std::unique_ptr<Shared_Lower_Matrix> L_shared;
+      const bool use_shared
+        = use_multimodular && env_int("SDPB_MULTIMODULAR_SHARED", 1) != 0
+          && on_one_node(schur_complement.blocks[block].Grid().Comm().comm);
+      if(use_shared)
+        L_shared = std::make_unique<Shared_Lower_Matrix>(
+          schur_complement.blocks[block].Height(),
+          schur_complement.blocks[block].Grid().Comm().comm);
+      else if(use_multimodular)
         L_storage = std::make_unique<Lower_BigFloat_Matrix>(
           schur_complement.blocks[block].Height());
       El::Matrix<El::BigFloat> dummy;
       El::Matrix<El::BigFloat> &L_full
-        = use_multimodular ? L_storage->matrix : dummy;
+        = use_shared ? L_shared->matrix
+                     : (use_multimodular ? L_storage->matrix : dummy);
       if(use_multimodular && iteration == 1
          && std::getenv("SDPB_MULTIMODULAR_DEBUG") != nullptr)
         std::cerr << El::BuildString(
@@ -349,7 +629,13 @@ void initialize_schur_off_diagonal(
         Scoped_Timer cholesky_timer(timers, "cholesky_" + block_index_string);
         try
           {
-            if(use_multimodular)
+            if(use_shared)
+              {
+                multimodular_cholesky_shared(
+                  schur_complement.blocks[block],
+                  schur_complement_cholesky.blocks[block], *L_shared, timers);
+              }
+            else if(use_multimodular)
               {
                 multimodular_cholesky(schur_complement.blocks[block],
                                       schur_complement_cholesky.blocks[block],
