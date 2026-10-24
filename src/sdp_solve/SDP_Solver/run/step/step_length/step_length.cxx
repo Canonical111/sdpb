@@ -6,8 +6,8 @@
 // semidefinite.
 //
 // \alpha(M, dM) is computed with a Cholesky decomposition M = L L^T.
-// The eigenvalues of M + \alpha dM are equal to the eigenvalues of 1
-// + \alpha L^{-1} dM L^{-T}.  The correct \alpha is then -1/lambda,
+// M + \alpha dM is congruent to I + \alpha L^{-1} dM L^{-T}.
+// For exact arithmetic the boundary \alpha is then -1/lambda,
 // where lambda is the smallest eigenvalue of L^{-1} dM L^{-T}.
 //
 // Inputs:
