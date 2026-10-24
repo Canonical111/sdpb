@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <boost/iostreams/filtering_stream.hpp>
 #include <boost/iostreams/device/file.hpp>
 #include <boost/iostreams/filter/gzip.hpp>
@@ -189,15 +190,33 @@ namespace Sdpb::Sdpa
 
     template <class IStream>
     void read_sparse_matrices(
-      IStream &is, const std::function<void(SDPA_Matrix_Entry &&)> &accept)
+      IStream &is, const std::function<void(SDPA_Matrix_Entry &&)> &accept,
+      const std::function<bool(const SDPA_Matrix_Entry &)> &wanted)
     {
-      // Read all matrix entries in the file
+      // Read all matrix entries in the file.
+      // lab (bfss #44): the indices are read first; the value is converted to
+      // BigFloat only if this rank parses the entry's block. Other lines are
+      // skipped as text, so each value is converted by exactly one group root.
       while(!is.eof())
         {
           SDPA_Matrix_Entry sdpa_entry;
-          read_sparse_matrix_entry(is, sdpa_entry);
-          std::ws(is);
-          accept(std::move(sdpa_entry));
+          is >> sdpa_entry.matrix_index;
+          is >> sdpa_entry.block_index;
+          is >> sdpa_entry.i;
+          is >> sdpa_entry.j;
+          ASSERT(is.good(), "Error reading SDPA entry indices");
+          if(wanted(sdpa_entry))
+            {
+              is >> sdpa_entry.value;
+              std::ws(is);
+              ASSERT(is.eof() || is.good());
+              accept(std::move(sdpa_entry));
+            }
+          else
+            {
+              is.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+              std::ws(is);
+            }
         }
     }
 
@@ -335,7 +354,16 @@ namespace Sdpb::Sdpa
 
     switch(file_type)
       {
-      case sparse: read_sparse_matrices(is, accept_sdpa_entry); break;
+      case sparse:
+        read_sparse_matrices(
+          is, accept_sdpa_entry, [&](const SDPA_Matrix_Entry &sdpa_entry) {
+            size_t sdp_block_index, i, j;
+            block_structure.get_element_position(
+              sdpa_entry.block_index, sdpa_entry.i, sdpa_entry.j,
+              sdp_block_index, i, j);
+            return should_parse_block(sdp_block_index);
+          });
+        break;
       case dense:
         read_dense_matrices(is, block_structure, accept_sdpa_entry);
         break;
@@ -357,7 +385,9 @@ namespace Sdpb::Sdpa
       {
         if(!should_parse_block(index))
           continue;
-        result.parsed_blocks.emplace(index, sdp_blocks_F.at(index).value());
+        // lab (bfss #44): move instead of copy; the copy doubled the root's peak.
+        result.parsed_blocks.emplace(index,
+                                     std::move(sdp_blocks_F.at(index).value()));
       }
     rss_log("mark", "parse.result_copied");
     return result;
