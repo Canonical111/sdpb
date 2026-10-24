@@ -1,0 +1,63 @@
+#pragma once
+
+// Blocked Cholesky and triangular solve for El::Matrix<El::BigFloat> whose
+// O(n^3) work is done as matrix multiplications on fixed-point integers:
+// residues modulo ~100 primes, cblas_dgemm for each prime, and CRT,
+// as in bigint_syrk (see bigint_syrk/Readme.md).
+// Small diagonal blocks are handled by the usual El routines in BigFloat.
+//
+// Precision: in each product C -= A op(B), row i of A and column j of op(B)
+// are scaled by powers of 2 so that their largest entries are ~2^bits, with
+// bits = El::gmp::Precision() + guard_bits, and rounded to integers.
+// The integer product is exact, so the error of C_ij is bounded by
+// ~k * 2^-bits * max_l |A_il| * max_l |op(B)_lj|.
+// For Cholesky this is the usual normwise backward error bound
+// |dA_ij| <~ eps * sqrt(A_ii A_jj).
+
+#include <El.hpp>
+
+#include <cstddef>
+
+struct Multimodular_Blas_Config
+{
+  // Matrices of at most this size are processed by El::Cholesky / El::Trsm
+  int base_size = 64;
+  // Extra bits of the fixed-point integers on top of El::gmp::Precision()
+  int guard_bits = 64;
+  // Columns of op(B) processed at once (bounds the memory for residues)
+  int column_chunk = 256;
+};
+
+struct Multimodular_Blas_Timings
+{
+  double base_seconds = 0;     // El::Cholesky / El::Trsm on diagonal blocks
+  double to_int_seconds = 0;   // scaling, BigFloat -> fmpz, residues
+  double blas_seconds = 0;     // cblas_dgemm over all primes
+  double from_int_seconds = 0; // CRT, fmpz -> BigFloat, update of C
+  size_t num_gemms = 0;
+  size_t max_num_primes = 0;
+  void add(const Multimodular_Blas_Timings &other);
+};
+
+// C -= A * op(B), op(B) = B or B^T.
+// If lower_only, only C(i,j) with i >= j are updated
+// (the strictly upper triangle of C is left untouched).
+void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
+                           const El::Matrix<El::BigFloat> &A,
+                           El::Orientation orientation_B,
+                           const El::Matrix<El::BigFloat> &B, bool lower_only,
+                           const Multimodular_Blas_Config &config,
+                           Multimodular_Blas_Timings &timings);
+
+// B := L^{-1} B, L lower triangular with nonzero diagonal
+// (only the lower triangle of L is read).
+void multimodular_trsm_left_lower(const El::Matrix<El::BigFloat> &L,
+                                  El::Matrix<El::BigFloat> &B,
+                                  const Multimodular_Blas_Config &config,
+                                  Multimodular_Blas_Timings &timings);
+
+// A := L, the lower Cholesky factor of A, as El::Cholesky(LOWER, A):
+// only the lower triangle is read and written.
+void multimodular_cholesky_lower(El::Matrix<El::BigFloat> &A,
+                                 const Multimodular_Blas_Config &config,
+                                 Multimodular_Blas_Timings &timings);

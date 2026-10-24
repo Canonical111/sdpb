@@ -5,6 +5,58 @@
 #include "sdp_solve/memory_estimates.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
+#include <cstdlib>
+#include <fstream>
+
+// Debug/benchmark hook: if SDPB_DUMP_BLOCK=<global block index> and
+// SDPB_DUMP_DIR=<dir> are set, write that block's Schur complement and
+// free_var_matrix at iteration SDPB_DUMP_ITER (default 1) to
+// <dir>/{schur,B}_<block>_iter<k>.bin: int64 height, int64 width,
+// int64 precision, then the El::BigFloat::Serialize() bytes, column-major.
+namespace
+{
+  void dump_matrix(const El::DistMatrix<El::BigFloat> &matrix,
+                   const std::string &path)
+  {
+    El::DistMatrix<El::BigFloat, El::STAR, El::STAR> local(matrix);
+    if(matrix.Grid().Rank() != 0)
+      return;
+    std::ofstream out(path, std::ios::binary);
+    int64_t header[3] = {local.Height(), local.Width(),
+                         static_cast<int64_t>(El::gmp::Precision())};
+    out.write(reinterpret_cast<const char *>(header), sizeof(header));
+    std::vector<El::byte> buffer;
+    for(int j = 0; j < local.Width(); ++j)
+      for(int i = 0; i < local.Height(); ++i)
+        {
+          const auto &value = local.GetLocalCRef(i, j);
+          buffer.resize(value.SerializedSize());
+          value.Serialize(buffer.data());
+          out.write(reinterpret_cast<const char *>(buffer.data()),
+                    buffer.size());
+        }
+  }
+
+  void maybe_dump_block(const El::DistMatrix<El::BigFloat> &schur,
+                        const El::DistMatrix<El::BigFloat> &B,
+                        size_t global_block_index, int iteration)
+  {
+    const char *block_env = std::getenv("SDPB_DUMP_BLOCK");
+    const char *dir_env = std::getenv("SDPB_DUMP_DIR");
+    if(block_env == nullptr || dir_env == nullptr)
+      return;
+    const char *iter_env = std::getenv("SDPB_DUMP_ITER");
+    int dump_iteration = iter_env == nullptr ? 1 : std::atoi(iter_env);
+    if(std::stoul(block_env) != global_block_index
+       || iteration != dump_iteration)
+      return;
+    std::string suffix = std::to_string(global_block_index) + "_iter"
+                         + std::to_string(iteration) + ".bin";
+    dump_matrix(schur, std::string(dir_env) + "/schur_" + suffix);
+    dump_matrix(B, std::string(dir_env) + "/B_" + suffix);
+  }
+}
+
 // schur_off_diagonal = L^{-1} B
 void initialize_schur_off_diagonal(
   const Environment &env, const SDP &sdp, const Block_Info &block_info,
@@ -13,6 +65,8 @@ void initialize_schur_off_diagonal(
   Block_Diagonal_Matrix &schur_complement_cholesky, Timers &timers,
   El::Matrix<int32_t> &block_timings_ms, const Verbosity verbosity)
 {
+  static int iteration = 0;
+  ++iteration;
   schur_off_diagonal.blocks.clear();
   schur_off_diagonal.blocks.reserve(schur_complement_cholesky.blocks.size());
 
@@ -22,6 +76,9 @@ void initialize_schur_off_diagonal(
       const auto global_block_index = block_info.block_indices.at(block);
       auto block_index_string = std::to_string(global_block_index);
       {
+        maybe_dump_block(schur_complement.blocks[block],
+                         sdp.free_var_matrix.blocks[block], global_block_index,
+                         iteration);
         Scoped_Timer cholesky_timer(timers, "cholesky_" + block_index_string);
         schur_complement_cholesky.blocks[block]
           = schur_complement.blocks[block];
