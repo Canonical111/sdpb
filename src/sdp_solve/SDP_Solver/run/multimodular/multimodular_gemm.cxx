@@ -354,6 +354,21 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
                            const Multimodular_Blas_Config &config,
                            Multimodular_Blas_Timings &timings)
 {
+  std::vector<int> row_start(C.Width(), 0);
+  if(lower_only)
+    for(int j = 0; j < C.Width(); ++j)
+      row_start[j] = j;
+  multimodular_gemm_sub(C, A, orientation_B, B, row_start, config, timings);
+}
+
+void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
+                           const El::Matrix<El::BigFloat> &A,
+                           const El::Orientation orientation_B,
+                           const El::Matrix<El::BigFloat> &B,
+                           const std::vector<int> &row_start,
+                           const Multimodular_Blas_Config &config,
+                           Multimodular_Blas_Timings &timings)
+{
   const bool transpose_B = orientation_B != El::NORMAL;
   const int m = A.Height();
   const int k = A.Width();
@@ -361,6 +376,7 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
   ASSERT_EQUAL(C.Height(), m);
   ASSERT_EQUAL(C.Width(), n);
   ASSERT_EQUAL(transpose_B ? B.Width() : B.Height(), k);
+  ASSERT_EQUAL(row_start.size(), size_t(n));
   if(m == 0 || n == 0 || k == 0)
     return;
 
@@ -487,7 +503,7 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
           const int j = j0 + jj;
           if(col_exp[j] == no_exponent)
             continue;
-          for(int i = lower_only ? std::max(j, 0) : 0; i < m; ++i)
+          for(int i = std::max(row_start[j], 0); i < m; ++i)
             {
               if(row_exp[i] == no_exponent)
                 continue;

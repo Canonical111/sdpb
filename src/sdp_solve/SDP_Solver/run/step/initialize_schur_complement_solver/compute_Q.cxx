@@ -8,6 +8,7 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
 
 // Debug/benchmark hook: if SDPB_DUMP_BLOCK=<global block index> and
 // SDPB_DUMP_DIR=<dir> are set, write that block's Schur complement and
@@ -92,8 +93,89 @@ namespace
     return result;
   }
 
-  // Every rank of the block's grid gets the whole Schur block and computes
-  // its Cholesky factor L (redundantly, no communication), then writes its
+  int multimodular_distributed_min_size()
+  {
+    static const int result = env_int("SDPB_MULTIMODULAR_DIST_MIN", 256);
+    return result;
+  }
+
+  // Cholesky (lower, in place) of the n x n matrix A, a view of a matrix
+  // that every rank of the grid holds in full, with the same values.
+  // In each recursion level, A = [A11 *; A21 A22]:
+  //   A11 := chol(A11)                       (recursive)
+  //   A21 := L21, L21^T = L11^{-1} A21^T     (columns of A21^T split)
+  //   A22 -= L21 L21^T, lower triangle       (columns of A22 split)
+  //   A22 := chol(A22)                       (recursive)
+  // The split parts are computed by each rank for its columns
+  // ([STAR,VR]: column j on rank j mod g) and then allgathered.
+  // Below SDPB_MULTIMODULAR_DIST_MIN (or on one rank) every rank computes
+  // the whole factorization.
+  void distributed_multimodular_cholesky(El::Matrix<El::BigFloat> &A,
+                                         const El::Grid &grid)
+  {
+    const int n = A.Height();
+    const auto &config = multimodular_config();
+    Multimodular_Blas_Timings timings;
+    if(grid.Size() == 1 || n < multimodular_distributed_min_size())
+      {
+        multimodular_cholesky_lower(A, config, timings);
+        return;
+      }
+    const int n1 = n / 2, n2 = n - n1;
+    const auto top = El::IR(0, n1), bottom = El::IR(n1, n);
+    auto A11 = A(top, top);
+    auto A21 = A(bottom, top);
+    auto A22 = A(bottom, bottom);
+
+    distributed_multimodular_cholesky(A11, grid);
+
+    // L21^T = L11^{-1} A21^T
+    {
+      El::DistMatrix<El::BigFloat, El::STAR, El::VR> L21_T(n1, n2, grid);
+      auto &local = L21_T.Matrix();
+      for(int jLoc = 0; jLoc < L21_T.LocalWidth(); ++jLoc)
+        {
+          const int j = L21_T.GlobalCol(jLoc);
+          for(int i = 0; i < n1; ++i)
+            local.Set(i, jLoc, A21.CRef(j, i));
+        }
+      multimodular_trsm_left_lower(A11, local, config, timings);
+      El::DistMatrix<El::BigFloat, El::STAR, El::STAR> L21_T_all(L21_T);
+      for(int j = 0; j < n2; ++j)
+        for(int i = 0; i < n1; ++i)
+          A21.Set(j, i, L21_T_all.GetLocalCRef(i, j));
+    }
+
+    // A22 -= L21 L21^T, lower triangle
+    {
+      El::DistMatrix<El::BigFloat, El::STAR, El::VR> A22_columns(n2, n2,
+                                                                  grid);
+      auto &local = A22_columns.Matrix();
+      const int width = A22_columns.LocalWidth();
+      El::Matrix<El::BigFloat> L21_rows(width, n1);
+      std::vector<int> row_start(width);
+      for(int jLoc = 0; jLoc < width; ++jLoc)
+        {
+          const int j = A22_columns.GlobalCol(jLoc);
+          row_start[jLoc] = j;
+          for(int i = j; i < n2; ++i)
+            local.Set(i, jLoc, A22.CRef(i, j));
+          for(int l = 0; l < n1; ++l)
+            L21_rows.Set(jLoc, l, A21.CRef(j, l));
+        }
+      multimodular_gemm_sub(local, A21, El::TRANSPOSE, L21_rows, row_start,
+                            config, timings);
+      El::DistMatrix<El::BigFloat, El::STAR, El::STAR> A22_all(A22_columns);
+      for(int j = 0; j < n2; ++j)
+        for(int i = j; i < n2; ++i)
+          A22.Set(i, j, A22_all.GetLocalCRef(i, j));
+    }
+
+    distributed_multimodular_cholesky(A22, grid);
+  }
+
+  // Every rank of the block's grid gets the whole Schur block, computes its
+  // Cholesky factor L (distributed_multimodular_cholesky), and writes its
   // own entries of the distributed factor.
   // As El::Cholesky, the strictly upper triangle keeps the input values.
   void multimodular_cholesky(
@@ -107,8 +189,7 @@ namespace
     }
     {
       Scoped_Timer timer(timers, "multimodular");
-      Multimodular_Blas_Timings timings;
-      multimodular_cholesky_lower(L.Matrix(), multimodular_config(), timings);
+      distributed_multimodular_cholesky(L.Matrix(), L.Grid());
     }
     Scoped_Timer timer(timers, "set_local");
     cholesky = schur;
@@ -163,6 +244,13 @@ void initialize_schur_off_diagonal(
           && schur_complement.blocks[block].Height() >= multimodular_min_size();
       El::DistMatrix<El::BigFloat, El::STAR, El::STAR> L_full(
         schur_complement.blocks[block].Grid());
+      if(use_multimodular && iteration == 1
+         && std::getenv("SDPB_MULTIMODULAR_DEBUG") != nullptr)
+        std::cerr << El::BuildString(
+          "rank ", El::mpi::Rank(), ": block ", global_block_index, " size ",
+          schur_complement.blocks[block].Height(), " on ",
+          schur_complement.blocks[block].Grid().Size(),
+          " ranks: multimodular\n");
       {
         maybe_dump_block(schur_complement.blocks[block],
                          sdp.free_var_matrix.blocks[block], global_block_index,

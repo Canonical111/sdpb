@@ -17,6 +17,7 @@
 #include <El.hpp>
 
 #include <cstddef>
+#include <vector>
 
 struct Multimodular_Blas_Config
 {
@@ -49,6 +50,14 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
                            const El::Matrix<El::BigFloat> &A,
                            El::Orientation orientation_B,
                            const El::Matrix<El::BigFloat> &B, bool lower_only,
+                           const Multimodular_Blas_Config &config,
+                           Multimodular_Blas_Timings &timings);
+// Same, but only C(i,j) with i >= row_start[j] are updated.
+void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
+                           const El::Matrix<El::BigFloat> &A,
+                           El::Orientation orientation_B,
+                           const El::Matrix<El::BigFloat> &B,
+                           const std::vector<int> &row_start,
                            const Multimodular_Blas_Config &config,
                            Multimodular_Blas_Timings &timings);
 
