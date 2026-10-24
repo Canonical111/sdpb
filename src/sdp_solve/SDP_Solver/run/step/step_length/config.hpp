@@ -64,8 +64,9 @@ inline Config configure() {
     const int hi=recv[i],lo=-recv[i+3];
     if(lo!=hi)
       throw std::runtime_error(std::string("selected step: ")+name
-        +" differs between MPI ranks (min code "+std::to_string(lo)
-        +", max code "+std::to_string(hi)+"); set it identically on all ranks");
+        +" differs between MPI ranks (parsed codes "+std::to_string(lo)
+        +".."+std::to_string(hi)+"; -1 means malformed); set it identically"
+        +" on all ranks");
     if(hi<0)
       throw std::runtime_error(std::string("selected step: malformed ")+name);
     return hi;
