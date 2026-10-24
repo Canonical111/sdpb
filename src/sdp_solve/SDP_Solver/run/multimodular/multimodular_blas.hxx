@@ -93,6 +93,9 @@ void multimodular_trsm_left_looking(const El::Matrix<El::BigFloat> &L,
 void substitution_trsm(const El::Matrix<El::BigFloat> &L,
                        El::Matrix<El::BigFloat> &B);
 
+// Lower Cholesky factor in BigFloat for small A, lower triangle only
+void base_cholesky_lower(El::Matrix<El::BigFloat> &A);
+
 // A := L, the lower Cholesky factor of A, as El::Cholesky(LOWER, A):
 // only the lower triangle is read and written.
 void multimodular_cholesky_lower(El::Matrix<El::BigFloat> &A,

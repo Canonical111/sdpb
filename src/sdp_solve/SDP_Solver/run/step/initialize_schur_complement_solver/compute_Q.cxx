@@ -6,7 +6,10 @@
 #include "sdp_solve/memory_estimates.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
+#include <boost/noncopyable.hpp>
+
 #include <cstdlib>
+#include <memory>
 #include <fstream>
 #include <iostream>
 
@@ -184,38 +187,89 @@ namespace
     distributed_multimodular_cholesky(A22, grid);
   }
 
-  // Every rank of the block's grid gets the whole Schur block, computes its
-  // Cholesky factor L (distributed_multimodular_cholesky), and writes its
-  // own entries of the distributed factor.
+  // n x n El::Matrix<BigFloat> whose strictly upper elements have minimal
+  // precision: they are never used, and this halves the memory of the
+  // replicated factor (El::Matrix::Resize would allocate them in full).
+  class Lower_BigFloat_Matrix : boost::noncopyable
+  {
+    El::BigFloat *data = nullptr;
+    size_t size = 0;
+
+  public:
+    El::Matrix<El::BigFloat> matrix;
+    explicit Lower_BigFloat_Matrix(int n) : size(size_t(n) * n)
+    {
+      data = static_cast<El::BigFloat *>(
+        ::operator new(sizeof(El::BigFloat) * size));
+      for(int j = 0; j < n; ++j)
+        for(int i = 0; i < n; ++i)
+          new(data + i + size_t(j) * n)
+            El::BigFloat(0, i >= j ? El::gmp::Precision() : 1);
+      matrix.Attach(n, n, data, n);
+    }
+    ~Lower_BigFloat_Matrix()
+    {
+      matrix.Empty();
+      for(size_t k = 0; k < size; ++k)
+        data[k].~BigFloat();
+      ::operator delete(data);
+    }
+  };
+
+  // L := the lower triangle of the distributed matrix `schur`, on every rank
+  // of its grid. Gathered in column panels, rows j0..n of columns j0..j1 at
+  // a time, so the transient buffers stay small and only the lower triangle
+  // moves.
+  void gather_lower(const El::DistMatrix<El::BigFloat> &schur,
+                    El::Matrix<El::BigFloat> &L)
+  {
+    const int n = schur.Height();
+    ASSERT_EQUAL(L.Height(), n);
+    const int panel = 64;
+    for(int j0 = 0; j0 < n; j0 += panel)
+      {
+        const int j1 = std::min(n, j0 + panel);
+        El::DistMatrix<El::BigFloat, El::STAR, El::STAR> part(
+          schur(El::IR(j0, n), El::IR(j0, j1)));
+        for(int j = j0; j < j1; ++j)
+          for(int i = j; i < n; ++i)
+            mpf_set(L.Ref(i, j).gmp_float.get_mpf_t(),
+                    part.GetLocalCRef(i - j0, j - j0).gmp_float.get_mpf_t());
+      }
+  }
+
+  // Every rank of the block's grid gets the lower triangle of the Schur
+  // block, computes its Cholesky factor L (distributed_multimodular_cholesky),
+  // and writes its own entries of the distributed factor.
   // As El::Cholesky, the strictly upper triangle keeps the input values.
-  void multimodular_cholesky(
-    const El::DistMatrix<El::BigFloat> &schur,
-    El::DistMatrix<El::BigFloat> &cholesky,
-    El::DistMatrix<El::BigFloat, El::STAR, El::STAR> &L, Timers &timers)
+  void multimodular_cholesky(const El::DistMatrix<El::BigFloat> &schur,
+                             El::DistMatrix<El::BigFloat> &cholesky,
+                             El::Matrix<El::BigFloat> &L, Timers &timers)
   {
     {
       Scoped_Timer timer(timers, "allgather");
-      L = schur;
+      gather_lower(schur, L);
     }
     {
       Scoped_Timer timer(timers, "multimodular");
-      distributed_multimodular_cholesky(L.Matrix(), L.Grid());
+      distributed_multimodular_cholesky(L, schur.Grid());
     }
     Scoped_Timer timer(timers, "set_local");
     cholesky = schur;
     for(int jLoc = 0; jLoc < cholesky.LocalWidth(); ++jLoc)
       for(int iLoc = 0; iLoc < cholesky.LocalHeight(); ++iLoc)
-        cholesky.SetLocal(
-          iLoc, jLoc,
-          L.GetLocalCRef(cholesky.GlobalRow(iLoc), cholesky.GlobalCol(jLoc)));
+        {
+          const int i = cholesky.GlobalRow(iLoc), j = cholesky.GlobalCol(jLoc);
+          if(i >= j)
+            cholesky.SetLocal(iLoc, jLoc, L.CRef(i, j));
+        }
   }
 
   // B := L^{-1} B. The columns of B are split among the ranks of the grid
   // ([STAR,VR] distribution); each rank solves for its own columns with
   // its full copy of L.
-  void
-  multimodular_solve(const El::DistMatrix<El::BigFloat, El::STAR, El::STAR> &L,
-                     El::DistMatrix<El::BigFloat> &B, Timers &timers)
+  void multimodular_solve(const El::Matrix<El::BigFloat> &L,
+                          El::DistMatrix<El::BigFloat> &B, Timers &timers)
   {
     Scoped_Timer to_columns_timer(timers, "to_columns");
     El::DistMatrix<El::BigFloat, El::STAR, El::VR> B_columns(B);
@@ -223,7 +277,7 @@ namespace
     {
       Scoped_Timer timer(timers, "multimodular");
       Multimodular_Blas_Timings timings;
-      multimodular_trsm_left_lower(L.LockedMatrix(), B_columns.Matrix(),
+      multimodular_trsm_left_lower(L, B_columns.Matrix(),
                                    multimodular_config(), timings);
     }
     Scoped_Timer timer(timers, "from_columns");
@@ -252,8 +306,13 @@ void initialize_schur_off_diagonal(
       const bool use_multimodular
         = use_multimodular_trsm()
           && schur_complement.blocks[block].Height() >= multimodular_min_size();
-      El::DistMatrix<El::BigFloat, El::STAR, El::STAR> L_full(
-        schur_complement.blocks[block].Grid());
+      std::unique_ptr<Lower_BigFloat_Matrix> L_storage;
+      if(use_multimodular)
+        L_storage = std::make_unique<Lower_BigFloat_Matrix>(
+          schur_complement.blocks[block].Height());
+      El::Matrix<El::BigFloat> dummy;
+      El::Matrix<El::BigFloat> &L_full
+        = use_multimodular ? L_storage->matrix : dummy;
       if(use_multimodular && iteration == 1
          && std::getenv("SDPB_MULTIMODULAR_DEBUG") != nullptr)
         std::cerr << El::BuildString(

@@ -9,6 +9,7 @@
 #include <cblas.h>
 
 #include <chrono>
+#include <cstdint>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -238,21 +239,22 @@ namespace
     return true;
   }
 
-  // Residues of n fixed-point integers trunc(x_e * 2^shift_e):
-  // out[e + n * i] = residue modulo prime i in [-(p_i+1)/2, (p_i+1)/2],
-  // multiplied by u_i if multiply_by_u.
+  // Residues of n fixed-point integers trunc(x_e * 2^shift_e), stored as
+  // int32 (half the memory of double; converted per prime before dgemm):
+  // out[e + prime_stride * i] = residue modulo prime i in
+  // [-(p_i+1)/2, (p_i+1)/2], multiplied by u_i if multiply_by_u.
   // element(e, shift) returns x_e (nullptr for zero) and sets shift.
   template <class Element>
   void compute_residues(const Residue_Context &context, size_t n,
                         const Element &element, bool multiply_by_u,
-                        double *out, size_t prime_stride = 0)
+                        int32_t *out, size_t prime_stride = 0)
   {
     if(prime_stride == 0)
       prime_stride = n;
     const size_t num_primes = context.num_primes;
     const int T = context.num_chunks;
     constexpr size_t batch = 2048;
-    std::vector<double> chunks(batch * T);
+    std::vector<double> chunks(batch * T), residues(batch * num_primes);
     std::vector<mp_limb_t> buffer(chunk_bits * T / GMP_NUMB_BITS + 2);
     for(size_t e0 = 0; e0 < n; e0 += batch)
       {
@@ -272,24 +274,80 @@ namespace
         // |sum| < T 2^24 p < 2^53
         cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, nb,
                     num_primes, T, 1.0, chunks.data(), nb, context.W.data(),
-                    T, 0.0, out + e0, prime_stride);
+                    T, 0.0, residues.data(), nb);
         for(size_t i = 0; i < num_primes; ++i)
           {
             const double p = context.primes[i];
             const double inv_p = context.inverse_primes[i];
-            double *__restrict r = out + e0 + prime_stride * i;
+            const double *__restrict r = residues.data() + nb * i;
+            int32_t *__restrict o = out + e0 + prime_stride * i;
             if(multiply_by_u)
               {
                 const double u = context.u[i];
                 for(size_t e = 0; e < nb; ++e)
-                  r[e] = round_mod(round_mod(r[e], p, inv_p) * u, p, inv_p);
+                  o[e] = int32_t(
+                    round_mod(round_mod(r[e], p, inv_p) * u, p, inv_p));
               }
             else
               {
                 for(size_t e = 0; e < nb; ++e)
-                  r[e] = round_mod(r[e], p, inv_p);
+                  o[e] = int32_t(round_mod(r[e], p, inv_p));
               }
           }
+      }
+  }
+
+  // One prime's product: C = (A B mod p) in [0, p) as int32, from int32
+  // residue matrices A (m x k, ld lda) and B (k x n, ld ldb), converted to
+  // double for cblas_dgemm. If quotients != nullptr, adds C/p to it
+  // (for the q of the BLAS CRT).
+  struct Prime_Gemm_Workspace
+  {
+    std::vector<double> A, B, C;
+  };
+  void prime_gemm(const Residue_Context &context, size_t prime, int m, int n,
+                  int k, const int32_t *A, size_t lda, const int32_t *B,
+                  size_t ldb, int32_t *C, double *quotients,
+                  Prime_Gemm_Workspace &work)
+  {
+    work.A.resize(size_t(m) * k);
+    work.B.resize(size_t(k) * n);
+    work.C.resize(size_t(m) * n);
+    for(int l = 0; l < k; ++l)
+      {
+        const int32_t *__restrict a = A + l * lda;
+        double *__restrict ad = work.A.data() + size_t(l) * m;
+        for(int i = 0; i < m; ++i)
+          ad[i] = a[i];
+      }
+    for(int j = 0; j < n; ++j)
+      {
+        const int32_t *__restrict b = B + j * ldb;
+        double *__restrict bd = work.B.data() + size_t(j) * k;
+        for(int l = 0; l < k; ++l)
+          bd[l] = b[l];
+      }
+    cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, m, n, k, 1.0,
+                work.A.data(), m, work.B.data(), k, 0.0, work.C.data(), m);
+    const double p = context.primes[prime];
+    const double inv_p = context.inverse_primes[prime];
+    const size_t size = size_t(m) * n;
+    const double *__restrict c = work.C.data();
+    int32_t *__restrict out = C;
+    if(quotients != nullptr)
+      {
+        double *__restrict q = quotients;
+        for(size_t e = 0; e < size; ++e)
+          {
+            const double r = mod_p(c[e], p, inv_p);
+            out[e] = int32_t(r);
+            q[e] += r * inv_p;
+          }
+      }
+    else
+      {
+        for(size_t e = 0; e < size; ++e)
+          out[e] = int32_t(mod_p(c[e], p, inv_p));
       }
   }
 
@@ -341,7 +399,7 @@ namespace
   // Scratch space and the CRT step shared by the GEMM and the Trsm.
   struct Crt_Workspace
   {
-    std::vector<double> quotients, S_high;
+    std::vector<double> Y, S;
     std::vector<mp_limb_t> crt_input, acc;
     fmpz_t z;
     mpf_t value;
@@ -358,62 +416,59 @@ namespace
     }
   };
 
-  // C_residues: num_primes blocks (stride m*width) of the m x width residue
-  // products (unreduced dgemm output; times u_p unless flint_crt).
+  // C_residues: num_primes blocks (stride m*width) of the m x width products
+  // reduced to [0, p) (times u_p unless flint_crt); quotients[e] =
+  // sum_p y_p / p (BLAS CRT only).
   // C(i, j) -= c_ij 2^(row_exp[i] + col_exp[j] - shift_base)
   // for row_start[j] <= i < m.
   void crt_subtract(const Residue_Context &context, bool flint_crt,
-                    double *C_residues, int m, int width,
-                    El::Matrix<El::BigFloat> &C,
+                    const int32_t *C_residues, const double *quotients,
+                    int m, int width, El::Matrix<El::BigFloat> &C,
                     const std::vector<long> &row_exp,
                     const std::vector<long> &col_exp, long shift_base,
                     const std::vector<int> &row_start, Crt_Workspace &work)
   {
     const size_t num_primes = context.num_primes;
     const size_t C_stride = size_t(m) * width;
+    const int H = context.num_high_chunks;
     Fmpz_Comb &comb = const_cast<Fmpz_Comb &>(context.comb);
-    if(!flint_crt)
+    constexpr size_t batch = 1024;
+    for(size_t e0 = 0; e0 < C_stride; e0 += batch)
       {
-        // y_p = (u_p c mod p) in [0, p); q = round(sum_p y_p / p)
-        work.quotients.assign(C_stride, 0.0);
-        work.S_high.resize(C_stride * context.num_high_chunks);
-        for(size_t p = 0; p < num_primes; ++p)
+        const size_t nb = std::min(batch, C_stride - e0);
+        if(!flint_crt)
           {
-            const double prime = context.primes[p];
-            const double inv_p = context.inverse_primes[p];
-            double *__restrict y = C_residues + p * C_stride;
-            double *__restrict q = work.quotients.data();
-            for(size_t e = 0; e < C_stride; ++e)
+            // S_t = sum_p y_p m_pt for the elements of this batch
+            work.Y.resize(nb * num_primes);
+            work.S.resize(nb * H);
+            for(size_t p = 0; p < num_primes; ++p)
               {
-                const double r = mod_p(y[e], prime, inv_p);
-                y[e] = r;
-                q[e] += r * inv_p;
+                const int32_t *__restrict y = C_residues + p * C_stride + e0;
+                double *__restrict yd = work.Y.data() + p * nb;
+                for(size_t e = 0; e < nb; ++e)
+                  yd[e] = y[e];
               }
+            cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, nb, H,
+                        num_primes, 1.0, work.Y.data(), nb,
+                        context.M_chunks.data(), num_primes, 0.0,
+                        work.S.data(), nb);
           }
-        // S_t = sum_p y_p m_pt
-        cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, C_stride,
-                    context.num_high_chunks, num_primes, 1.0, C_residues,
-                    C_stride, context.M_chunks.data(), num_primes, 0.0,
-                    work.S_high.data(), C_stride);
-      }
-    for(int j = 0; j < width; ++j)
-      {
-        if(col_exp[j] == no_exponent)
-          continue;
-        for(int i = std::max(row_start[j], 0); i < m; ++i)
+        for(size_t eb = 0; eb < nb; ++eb)
           {
-            if(row_exp[i] == no_exponent)
+            const size_t e = e0 + eb;
+            const int i = e % m, j = e / m;
+            if(col_exp[j] == no_exponent || row_exp[i] == no_exponent
+               || i < row_start[j])
               continue;
-            const size_t e = i + size_t(j) * m;
             long shift = row_exp[i] + col_exp[j] - shift_base;
             if(!flint_crt)
               {
-                const size_t q = std::lround(work.quotients[e]);
+                const size_t q = std::lround(quotients[e]);
                 int size;
-                const int sign = assemble(
-                  context, work.S_high.data() + e, C_stride,
-                  context.qM.data() + q * context.num_limbs, work.acc.data(),
-                  size);
+                const int sign
+                  = assemble(context, work.S.data() + eb, nb,
+                             context.qM.data() + q * context.num_limbs,
+                             work.acc.data(), size);
                 if(size == 0)
                   continue;
                 __mpf_struct view;
@@ -430,8 +485,7 @@ namespace
             else
               {
                 for(size_t p = 0; p < num_primes; ++p)
-                  work.crt_input[p] = double_to_uint32_t_residue(
-                    C_residues[e + p * C_stride], comb.mods[p]);
+                  work.crt_input[p] = C_residues[e + p * C_stride];
                 fmpz_multi_CRT_ui(work.z, work.crt_input.data(), comb.comb,
                                   comb.comb_temp, 1);
                 if(fmpz_is_zero(work.z))
@@ -522,7 +576,7 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
   // Residues of A (times u_p for the BLAS CRT):
   // for prime p, an m x k column-major matrix at p*m*k
   const size_t A_stride = size_t(m) * k;
-  std::vector<double> A_residues(num_primes * A_stride);
+  std::vector<int32_t> A_residues(num_primes * A_stride);
   compute_residues(
     context, A_stride,
     [&](size_t e, long &shift) -> const __mpf_struct * {
@@ -536,9 +590,11 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
   timings.to_int_seconds += seconds_since(start);
 
   const int chunk = std::max(1, std::min(config.column_chunk, n));
-  std::vector<double> B_residues(num_primes * size_t(k) * chunk);
-  std::vector<double> C_residues(num_primes * size_t(m) * chunk);
+  std::vector<int32_t> B_residues(num_primes * size_t(k) * chunk);
+  std::vector<int32_t> C_residues(num_primes * size_t(m) * chunk);
+  std::vector<double> quotients;
   Crt_Workspace work(context);
+  Prime_Gemm_Workspace gemm_work;
 
   for(int j0 = 0; j0 < n; j0 += chunk)
     {
@@ -560,13 +616,12 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
       timings.to_int_seconds += seconds_since(start);
 
       start = Clock::now();
+      quotients.assign(flint_crt ? 0 : C_stride, 0.0);
       for(size_t p = 0; p < num_primes; ++p)
-        {
-          cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, m, width, k,
-                      1.0, A_residues.data() + p * A_stride, m,
-                      B_residues.data() + p * B_stride, k, 0.0,
-                      C_residues.data() + p * C_stride, m);
-        }
+        prime_gemm(context, p, m, width, k, A_residues.data() + p * A_stride,
+                   m, B_residues.data() + p * B_stride, k,
+                   C_residues.data() + p * C_stride,
+                   flint_crt ? nullptr : quotients.data(), gemm_work);
       timings.blas_seconds += seconds_since(start);
 
       start = Clock::now();
@@ -575,8 +630,9 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
                                             col_exp.begin() + j0 + width);
       const std::vector<int> chunk_row_start(row_start.begin() + j0,
                                              row_start.begin() + j0 + width);
-      crt_subtract(context, flint_crt, C_residues.data(), m, width, C_chunk,
-                   row_exp, chunk_col_exp, 2 * bits, chunk_row_start, work);
+      crt_subtract(context, flint_crt, C_residues.data(), quotients.data(), m,
+                   width, C_chunk, row_exp, chunk_col_exp, 2 * bits,
+                   chunk_row_start, work);
       timings.from_int_seconds += seconds_since(start);
     }
 }
@@ -620,9 +676,11 @@ void multimodular_trsm_left_looking(const El::Matrix<El::BigFloat> &L,
     1, std::min<size_t>(N, config.left_looking_bytes
                              / (sizeof(double) * num_primes * P)));
   const size_t X_stride = size_t(P) * chunk; // per prime
-  std::vector<double> X_residues(num_primes * X_stride);
-  std::vector<double> A_residues, C_residues, panel_residues;
+  std::vector<int32_t> X_residues(num_primes * X_stride);
+  std::vector<int32_t> A_residues, C_residues, panel_residues;
+  std::vector<double> quotients;
   Crt_Workspace work(context);
+  Prime_Gemm_Workspace gemm_work;
 
   for(int j0 = 0; j0 < N; j0 += chunk)
     {
@@ -657,18 +715,20 @@ void multimodular_trsm_left_looking(const El::Matrix<El::BigFloat> &L,
               start = Clock::now();
               const size_t C_stride = size_t(h) * width;
               C_residues.resize(num_primes * C_stride);
+              quotients.assign(flint_crt ? 0 : C_stride, 0.0);
               for(size_t p = 0; p < num_primes; ++p)
-                cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, h,
-                            width, r0, 1.0, A_residues.data() + p * A_stride,
-                            h, X_residues.data() + p * X_stride, P, 0.0,
-                            C_residues.data() + p * C_stride, h);
+                prime_gemm(context, p, h, width, r0,
+                           A_residues.data() + p * A_stride, h,
+                           X_residues.data() + p * X_stride, P,
+                           C_residues.data() + p * C_stride,
+                           flint_crt ? nullptr : quotients.data(), gemm_work);
               timings.blas_seconds += seconds_since(start);
               ++timings.num_gemms;
 
               start = Clock::now();
-              crt_subtract(context, flint_crt, C_residues.data(), h, width, R,
-                           row_exp, col_e, bits_L + bits_X,
-                           std::vector<int>(width, 0), work);
+              crt_subtract(context, flint_crt, C_residues.data(),
+                           quotients.data(), h, width, R, row_exp, col_e,
+                           bits_L + bits_X, std::vector<int>(width, 0), work);
               timings.from_int_seconds += seconds_since(start);
             }
 

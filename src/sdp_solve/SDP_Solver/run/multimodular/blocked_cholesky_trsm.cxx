@@ -82,6 +82,49 @@ void multimodular_trsm_left_lower(const El::Matrix<El::BigFloat> &L,
   multimodular_trsm_left_lower(L(bottom, bottom), B2, config, timings);
 }
 
+// Cholesky of a small matrix in BigFloat, reading and writing only the
+// lower triangle (the strictly upper part may hold anything).
+void base_cholesky_lower(El::Matrix<El::BigFloat> &A)
+{
+  const int n = A.Height();
+  const mp_bitcnt_t precision = El::gmp::Precision();
+  mpf_t t, inverse;
+  mpf_init2(t, precision);
+  mpf_init2(inverse, precision);
+  for(int j = 0; j < n; ++j)
+    {
+      mpf_ptr a_jj = A.Ref(j, j).gmp_float.get_mpf_t();
+      for(int k = 0; k < j; ++k)
+        {
+          mpf_srcptr a_jk = A.CRef(j, k).gmp_float.get_mpf_t();
+          mpf_mul(t, a_jk, a_jk);
+          mpf_sub(a_jj, a_jj, t);
+        }
+      if(mpf_sgn(a_jj) <= 0)
+        {
+          mpf_clear(t);
+          mpf_clear(inverse);
+          RUNTIME_ERROR("Cholesky: matrix is not positive definite (pivot ",
+                        j, " of ", n, ")");
+        }
+      mpf_sqrt(a_jj, a_jj);
+      mpf_ui_div(inverse, 1, a_jj);
+      for(int i = j + 1; i < n; ++i)
+        {
+          mpf_ptr a_ij = A.Ref(i, j).gmp_float.get_mpf_t();
+          for(int k = 0; k < j; ++k)
+            {
+              mpf_mul(t, A.CRef(i, k).gmp_float.get_mpf_t(),
+                      A.CRef(j, k).gmp_float.get_mpf_t());
+              mpf_sub(a_ij, a_ij, t);
+            }
+          mpf_mul(a_ij, a_ij, inverse);
+        }
+    }
+  mpf_clear(t);
+  mpf_clear(inverse);
+}
+
 // Recursive: A = [A11 *; A21 A22]
 //   A11 := L11 = chol(A11)
 //   A21 := L21 = A21 L11^{-T}, i.e. L21^T = L11^{-1} A21^T
@@ -96,7 +139,7 @@ void multimodular_cholesky_lower(El::Matrix<El::BigFloat> &A,
   if(n <= config.base_size)
     {
       auto start = Clock::now();
-      El::Cholesky(El::LOWER, A);
+      base_cholesky_lower(A);
       timings.base_seconds += seconds_since(start);
       return;
     }
