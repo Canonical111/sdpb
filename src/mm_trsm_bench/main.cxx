@@ -7,10 +7,10 @@
 //            [--chunk K] [--out-L file] [--out-X file]
 //          Computes L = chol(S) and X = L^{-1} B (first N rows/columns of S,
 //          first C columns of B), prints the timings.
-// compare: mm_trsm_bench compare <X_ref.bin> <X.bin>
+// compare: mm_trsm_bench compare <X_ref.bin> <X.bin> [lower]
 //          Prints log2 of the max elementwise relative difference and of
-//          the max over columns of max_i|dX_ij| / max_i|X_ref_ij|
-//          (lower triangle only if both are square).
+//          the max over columns (rows) of max|dX| / max|X_ref| in the
+//          column (row); with "lower", only the lower triangle (for L).
 
 #include "sdp_solve/SDP_Solver/run/multimodular/multimodular_blas.hxx"
 
@@ -116,7 +116,8 @@ namespace
     return std::log2(std::abs(d)) + e;
   }
 
-  int compare(const std::string &ref_path, const std::string &path)
+  int compare(const std::string &ref_path, const std::string &path,
+              const bool lower)
   {
     El::gmp::SetPrecision(
       std::max(file_precision(ref_path), file_precision(path)) + 128);
@@ -124,7 +125,8 @@ namespace
     auto x = read_matrix(path);
     if(ref.Height() != x.Height() || ref.Width() != x.Width())
       throw std::runtime_error("size mismatch");
-    const bool lower = ref.Height() == ref.Width();
+    if(lower && ref.Height() != ref.Width())
+      throw std::runtime_error("lower: matrices must be square");
     double max_rel = -1e9, max_col = -1e9, max_row = -1e9;
     std::vector<double> col_max_ref(ref.Width(), -1e9),
       col_max_diff(ref.Width(), -1e9);
@@ -274,8 +276,9 @@ int main(int argc, char **argv)
       std::string mode = argv[1];
       if(mode == "run")
         return run(argc, argv);
-      if(mode == "compare" && argc == 4)
-        return compare(argv[2], argv[3]);
+      if(mode == "compare" && (argc == 4 || argc == 5))
+        return compare(argv[2], argv[3],
+                       argc == 5 && std::string(argv[4]) == "lower");
       throw std::runtime_error("bad arguments");
     }
   catch(std::exception &e)
