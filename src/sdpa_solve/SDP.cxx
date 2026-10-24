@@ -7,6 +7,10 @@
 
 #include <filesystem>
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace Sdpb::Sdpa
@@ -24,7 +28,7 @@ namespace Sdpb::Sdpa
 
     // For each MPI group, rank=0 parses objective_c and the blocks for F_0..F_m that belong to this group.
     // Other ranks do not parse anything.
-    const auto parse_result = [&] {
+    auto parse_result = [&] {
       if(comm.Rank() == 0)
         {
           Scoped_Timer parse_timer(timers, "parse");
@@ -91,6 +95,15 @@ namespace Sdpb::Sdpa
             }
         }
     }
+
+    // lab (bfss #44): release the root's parsed copy now and return its pages
+    // to the OS; otherwise the freed blocks sit below the distributed F in the
+    // heap and stay resident for the whole solve.
+    parse_result = SDPA_File_Parse_Result();
+#if defined(__GLIBC__)
+    ::malloc_trim(0);
+#endif
+    rss_log("mark", "SDP_ctor.after_parse_release_trim");
 
     Scoped_Timer validate_timer(timers, "validate");
     validate(block_info);
