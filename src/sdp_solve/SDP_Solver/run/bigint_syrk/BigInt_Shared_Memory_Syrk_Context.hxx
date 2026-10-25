@@ -7,6 +7,7 @@
 #include "sdpb_util/bigint_shared_memory/Matrix_Residues_Window.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -49,6 +50,21 @@ public:
                           &bigint_input_matrix_blocks,
                         El::DistMatrix<El::BigFloat> &bigint_output,
                         Timers &timers, El::Matrix<int32_t> &block_timings_ms);
+
+  // #184: same as bigint_syrk_blas(), but the input P is never held as a whole.
+  // The provider materializes, on demand, the row band [skip_rows, skip_rows + max_height)
+  // of the vertical block stack, restricted to columns col_range: one matrix per local
+  // block (zero-height for blocks outside the band), heights summing to
+  // min(max_height, remaining). Bands are freed after their residues are computed,
+  // so peak memory is one band instead of all of P.
+  using Band_Provider = std::function<void(
+    El::Int skip_rows, El::Int max_height, const El::Range<El::Int> &col_range,
+    std::vector<El::DistMatrix<El::BigFloat>> &bands)>;
+  void bigint_syrk_blas_from_bands(El::UpperOrLower uplo,
+                                   const Band_Provider &band_provider,
+                                   El::DistMatrix<El::BigFloat> &bigint_output,
+                                   Timers &timers,
+                                   El::Matrix<int32_t> &block_timings_ms);
 
 private:
   El::mpi::Comm shared_memory_comm;
@@ -96,6 +112,11 @@ private:
   void bigint_syrk_blas_shmem_submatrix(
     El::UpperOrLower uplo,
     const std::vector<El::DistMatrix<El::BigFloat>> &bigint_input_matrix_blocks,
+    const El::Range<El::Int> &output_I, const El::Range<El::Int> &output_J,
+    Timers &timers, El::Matrix<int32_t> &block_timings_ms);
+
+  void bigint_syrk_blas_shmem_submatrix_from_bands(
+    El::UpperOrLower uplo, const Band_Provider &band_provider,
     const El::Range<El::Int> &output_I, const El::Range<El::Int> &output_J,
     Timers &timers, El::Matrix<int32_t> &block_timings_ms);
 

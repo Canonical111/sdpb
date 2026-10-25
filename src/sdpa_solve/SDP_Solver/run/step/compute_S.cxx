@@ -1,4 +1,5 @@
 #include "Compute_S_Context.hxx"
+#include "P_Spill.hxx"
 #include "sdp_solve/Block_Matrix/Block_Matrix.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/Matrix_Normalizer.hxx"
 #include "sdpa_solve/SDP.hxx"
@@ -6,33 +7,54 @@
 #include "sdpb_util/split_range.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
-// Q = P^T P
-// See sdp_solve/SDP_Solver/run/step/initialize_schur_complement_solver/compute_Q.cxx
-// TODO rename
-void syrk_Q(const Environment &env, Block_Matrix &P,
-            BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,
-            El::DistMatrix<El::BigFloat> &Q, Timers &timers,
-            El::Matrix<int32_t> &block_timings_ms, const Verbosity verbosity);
+#include <cstdlib>
 
 namespace Sdpb::Sdpa
 {
+  // The normalized-and-shifted P, packed (#184), plus its column norms:
+  // everything the syrk step needs, at a fraction of full BigFloat P.
+  struct Spilled_P
+  {
+    P_Spill spill;
+    std::vector<El::BigFloat> column_norms;
+  };
+
+  // Shim for restore_syrk_output(): a column normalizer whose norms were
+  // collected chunk by chunk while P was being spilled.
+  struct Precomputed_Column_Normalizer final
+      : Abstract_Matrix_Normalizer<Matrix_Normalization_Kind::COLUMNS,
+                                   Block_Matrix>
+  {
+    Precomputed_Column_Normalizer(const int bits,
+                                  std::vector<El::BigFloat> &&_norms)
+        : Abstract_Matrix_Normalizer(
+            Block_Matrix{}, bits, std::nullopt,
+            [&_norms](const Block_Matrix &, const auto &) {
+              return std::move(_norms);
+            })
+    {}
+  };
+
   // compute P = (vec(G_1) vec(G_2) vec(G_3) ... )
   // G_p = L_X_Inv F_p L_Y
   // P is split vertically into blocks
-  Block_Matrix initialize_P(const Environment &env, const SDP &sdp,
-                            const Block_Info &block_info, const El::Grid &grid,
-                            const Block_Diagonal_Matrix &X_cholesky,
-                            const Block_Diagonal_Matrix &Y_cholesky,
-                            Initialize_P_Context &ctx, Timers &timers,
-                            El::Matrix<int32_t> &block_timings_ms,
-                            const Verbosity verbosity)
+  //
+  // #184: P is normalized, shifted to integers and packed into the spill
+  // chunk by chunk; the full BigFloat P (the second-largest resident object
+  // of the solve) never exists.
+  Spilled_P initialize_P(const Environment &env, const SDP &sdp,
+                         const Block_Info &block_info, const El::Grid &grid,
+                         const Block_Diagonal_Matrix &X_cholesky,
+                         const Block_Diagonal_Matrix &Y_cholesky,
+                         Initialize_P_Context &ctx, Timers &timers,
+                         El::Matrix<int32_t> &block_timings_ms,
+                         const Verbosity verbosity)
   {
     // TODO add timers, update block_timings_ms
     Scoped_Timer timer(timers, "initialize_P");
     const size_t primal_dimension = block_info.primal_dimension;
 
-    // Set matrix dimensions for output Block_Matrix P
-    // Each block is a (dim*dim) x primal_dimension matrix
+    // Each (virtual) P block is a (dim*dim) x primal_dimension matrix
     std::vector<size_t> P_block_heights;
     P_block_heights.reserve(block_info.num_blocks());
     for(const auto &dim : block_info.block_dimensions)
@@ -40,13 +62,28 @@ namespace Sdpb::Sdpa
         P_block_heights.emplace_back(dim * dim);
       }
     const size_t P_width = primal_dimension;
-    Block_Matrix result(P_block_heights, P_width, block_info.block_indices,
-                        grid);
-    if(verbosity >= Verbosity::trace)
-      {
-        print_allocation_message_per_node(env, "P",
-                                          get_allocated_bytes(result));
-      }
+
+    Spilled_P result;
+    {
+      std::vector<El::Int> local_heights;
+      for(const auto block_index : block_info.block_indices)
+        local_heights.push_back(P_block_heights.at(block_index));
+      std::optional<std::filesystem::path> spill_dir;
+      if(const char *dir = std::getenv("SDPB_P_SPILL_DIR"))
+        spill_dir = std::filesystem::path(dir);
+      result.spill.initialize(local_heights, P_width, grid,
+                              El::gmp::Precision(), spill_dir);
+      result.column_norms.resize(P_width);
+      if(verbosity >= Verbosity::trace)
+        {
+          size_t total_height = 0;
+          for(const auto h : local_heights)
+            total_height += h;
+          print_allocation_message_per_node(env, "P (packed spill)",
+                                            result.spill.record_bytes()
+                                              * total_height * P_width);
+        }
+    }
 
     const auto bits = El::gmp::Precision();
     constexpr auto uplo = El::LOWER;
@@ -158,26 +195,48 @@ namespace Sdpb::Sdpa
                               G_normalizer, G);
         }
 
-        // Copy each G_p into a p-th column of the corresponding block of P
+        // Copy each G_p into a column of a P chunk (columns [p_begin, p_end)),
+        // aligned so that element ownership matches the virtual full-width P.
         Scoped_Timer reshape_timer(timers, "reshape");
+        const size_t chunk_width = p_end - p_begin;
+        Block_Matrix P_chunk(P_block_heights, chunk_width,
+                             block_info.block_indices, grid);
+        for(auto &chunk_block : P_chunk.blocks)
+          {
+            const auto height = chunk_block.Height();
+            chunk_block.Empty();
+            chunk_block.Align(0, p_begin % grid.Width());
+            chunk_block.Resize(height, chunk_width);
+          }
         for(size_t block = 0; block < block_info.num_blocks_local(); ++block)
           {
-            const auto global_block_index = block_info.block_indices.at(block);
-            auto block_index_string = std::to_string(global_block_index);
             for(size_t p = p_begin; p < p_end; ++p)
               {
                 const auto &G_p_block = G.at(p - p_begin).blocks.at(block);
-                auto &P_block = result.blocks.at(block);
-                // Write all elements of G_p into the p-th column of the resulting P matrix
+                auto &P_block = P_chunk.blocks.at(block);
                 const int vec_height = P_block.Height();
                 constexpr int vec_width = 1;
                 const auto out_I = El::Range<int>(0, vec_height);
-                const auto out_J = El::Range<int>(p, p + vec_width);
+                const auto out_J
+                  = El::Range<int>(p - p_begin, p - p_begin + vec_width);
 
                 auto vec_G_p_view = El::View(P_block, out_I, out_J);
                 El::Reshape(vec_height, vec_width, G_p_block, vec_G_p_view);
               }
           }
+        reshape_timer.stop();
+
+        // Normalize this chunk's columns (norms are per column, so chunking
+        // changes nothing), shift to integers, and spill.
+        Scoped_Timer spill_timer(timers, "normalize_and_spill");
+        const auto chunk_normalizer
+          = normalize_and_shift<Matrix_Normalization_Kind::COLUMNS>(
+            P_chunk, static_cast<int>(bits), El::mpi::COMM_WORLD);
+        for(size_t j = 0; j < chunk_width; ++j)
+          result.column_norms.at(p_begin + j) = chunk_normalizer.norms.at(j);
+        for(size_t block = 0; block < block_info.num_blocks_local(); ++block)
+          result.spill.append_chunk_block(block, p_begin,
+                                          P_chunk.blocks.at(block));
       }
 
     return result;
@@ -193,11 +252,49 @@ namespace Sdpb::Sdpa
             El::Matrix<int32_t> &block_timings_ms, const Verbosity verbosity)
   {
     Scoped_Timer timer(timers, "S");
-    Block_Matrix P
+    Spilled_P P
       = initialize_P(env, sdp, block_info, grid, X_cholesky, Y_cholesky,
                      compute_S_context.initialize_P_context, timers,
                      block_timings_ms, verbosity);
-    syrk_Q(env, P, compute_S_context.syrk_S_context, S, timers,
-           block_timings_ms, verbosity);
+
+    // Band provider: one matrix per local block, zero-height outside the band,
+    // heights summing to min(max_height, remaining rows of the stack).
+    const auto &spill = P.spill;
+    const BigInt_Shared_Memory_Syrk_Context::Band_Provider band_provider
+      = [&spill](const El::Int skip_rows, const El::Int max_height,
+                 const El::Range<El::Int> &col_range,
+                 std::vector<El::DistMatrix<El::BigFloat>> &bands) {
+          bands.clear();
+          El::Int skip = skip_rows;
+          El::Int budget = max_height;
+          for(size_t b = 0; b < spill.block_heights.size(); ++b)
+            {
+              const auto height = spill.block_heights.at(b);
+              El::Int row_begin = 0, row_end = 0;
+              if(skip >= height)
+                {
+                  skip -= height;
+                }
+              else if(budget > 0)
+                {
+                  row_begin = skip;
+                  skip = 0;
+                  row_end = std::min(height, row_begin + budget);
+                  budget -= row_end - row_begin;
+                }
+              auto &band = bands.emplace_back();
+              spill.read_band(b, El::Range<El::Int>(row_begin, row_end),
+                              col_range, band);
+            }
+        };
+
+    constexpr auto uplo = El::UPPER;
+    compute_S_context.syrk_S_context.bigint_syrk_blas_from_bands(
+      uplo, band_provider, S, timers, block_timings_ms);
+
+    Scoped_Timer restore_timer(timers, "restore_S");
+    const Precomputed_Column_Normalizer normalizer(
+      static_cast<int>(El::gmp::Precision()), std::move(P.column_norms));
+    restore_syrk_output(uplo, normalizer, S);
   }
 }

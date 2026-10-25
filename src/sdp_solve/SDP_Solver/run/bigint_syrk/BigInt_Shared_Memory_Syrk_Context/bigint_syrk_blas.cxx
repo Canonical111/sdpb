@@ -301,3 +301,122 @@ void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas_shmem_submatrix(
 
   output_residues_window->Fence();
 }
+
+// #184: drivers that take a Band_Provider instead of persistent P blocks.
+// Mirrors bigint_syrk_blas()/bigint_syrk_blas_shmem_submatrix() above; the only
+// difference is that each input-window fill materializes its band on demand and
+// frees it afterwards, so P's BigFloat form never exists whole.
+void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas_from_bands(
+  const El::UpperOrLower uplo, const Band_Provider &band_provider,
+  El::DistMatrix<El::BigFloat> &bigint_output, Timers &timers,
+  El::Matrix<int32_t> &block_timings_ms)
+{
+  Scoped_Timer timer(timers, "bigint_syrk_blas");
+
+  ASSERT_EQUAL(bigint_output.Height(), bigint_output.Width());
+  ASSERT(output_residues_window->width * output_window_split_factor
+         >= bigint_output.Height());
+
+  const auto output_ranges
+    = split_range({0, bigint_output.Height()}, output_window_split_factor);
+
+  for(size_t i = 0; i < output_window_split_factor; ++i)
+    {
+      const auto &I = output_ranges.at(i);
+      for(size_t j = i; j < output_window_split_factor; ++j)
+        {
+          Scoped_Timer ij_timer(timers, El::BuildString("Q_", i, "_", j));
+          const auto &J = output_ranges.at(j);
+          auto bigint_output_submatrix = bigint_output(I, J);
+          bigint_syrk_blas_shmem_submatrix_from_bands(uplo, band_provider, I,
+                                                      J, timers,
+                                                      block_timings_ms);
+          std::optional<El::UpperOrLower> uplo_opt;
+          if(I.beg == J.beg)
+            uplo_opt = uplo;
+          restore_and_reduce(uplo_opt, bigint_output_submatrix, timers);
+        }
+    }
+}
+
+void BigInt_Shared_Memory_Syrk_Context::
+  bigint_syrk_blas_shmem_submatrix_from_bands(
+    const El::UpperOrLower uplo, const Band_Provider &band_provider,
+    const El::Range<El::Int> &output_I, const El::Range<El::Int> &output_J,
+    Timers &timers, El::Matrix<int32_t> &block_timings_ms)
+{
+  Scoped_Timer timer(timers, "shmem");
+
+  ASSERT(El::mpi::Congruent(shared_memory_comm,
+                            input_grouped_block_residues_window_A->Comm()));
+  ASSERT(
+    El::mpi::Congruent(shared_memory_comm, output_residues_window->Comm()));
+
+  ASSERT(input_window_split_factor > 0);
+
+  const auto output_height = output_I.end - output_I.beg;
+  const auto output_width = output_J.end - output_J.beg;
+
+  ASSERT(input_grouped_block_residues_window_A->width >= output_height,
+         DEBUG_STRING(input_grouped_block_residues_window_A->width),
+         DEBUG_STRING(output_height));
+  ASSERT(input_grouped_block_residues_window_A->width >= output_width,
+         DEBUG_STRING(input_grouped_block_residues_window_A->width),
+         DEBUG_STRING(output_width));
+
+  const auto kind = output_I == output_J ? Blas_Job::syrk : Blas_Job::gemm;
+  const auto &blas_job_schedule
+    = get_blas_job_schedule(kind, uplo, output_height, output_width);
+
+  clear_residues(blas_job_schedule);
+
+  for(size_t iter = 0; iter < input_window_split_factor; ++iter)
+    {
+      Scoped_Timer iter_timer(timers, "split_P_" + std::to_string(iter));
+
+      // Materialize this band and compute its residues.
+      // The band matrices are already sliced to (rows x col_range),
+      // so compute_block_residues() consumes them with no extra offsets.
+      std::vector<El::DistMatrix<El::BigFloat>> bands;
+      {
+        const auto skip_rows
+          = static_cast<El::Int>(iter * input_group_height_per_prime());
+        {
+          Scoped_Timer band_timer(timers, "materialize_band");
+          band_provider(skip_rows, input_group_height_per_prime(), output_I,
+                        bands);
+        }
+        compute_block_residues(*input_grouped_block_residues_window_A, bands,
+                               0, El::Range<El::Int>(0, output_height),
+                               timers, block_timings_ms);
+        if(output_I.beg != output_J.beg)
+          {
+            ASSERT(output_I.end != output_J.end);
+            std::vector<El::DistMatrix<El::BigFloat>> bands_B;
+            {
+              Scoped_Timer band_timer(timers, "materialize_band");
+              band_provider(skip_rows, input_group_height_per_prime(),
+                            output_J, bands_B);
+            }
+            compute_block_residues(*input_grouped_block_residues_window_B,
+                                   bands_B, 0,
+                                   El::Range<El::Int>(0, output_width), timers,
+                                   block_timings_ms);
+          }
+      }
+
+      {
+        Scoped_Timer syrk_timer(timers, "syrk");
+        do_blas_jobs(uplo, kind, blas_job_schedule,
+                     input_grouped_block_residues_window_A,
+                     input_grouped_block_residues_window_B,
+                     output_residues_window, shared_memory_comm, timers);
+        update_block_timings_with_syrk(
+          block_timings_ms, syrk_timer, bands, block_index_local_to_global,
+          shared_memory_comm, *input_grouped_block_residues_window_A,
+          total_block_height_per_node);
+      }
+    }
+
+  output_residues_window->Fence();
+}
