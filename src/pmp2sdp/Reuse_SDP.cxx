@@ -186,6 +186,12 @@ Reused_SDP::Reused_SDP(const fs::path &old_sdp, const int precision,
                    "pmp_info.json entries must be ordered by index");
       old_blocks_by_path[fs::path(doc["path"].GetString())].push_back(i);
     }
+  // Only rank 0 writes pmp_info.json
+  if(El::mpi::Rank() != 0)
+    {
+      for(auto &entry : raw_pmp_info_entries)
+        std::string().swap(entry);
+    }
 }
 
 std::optional<size_t>
