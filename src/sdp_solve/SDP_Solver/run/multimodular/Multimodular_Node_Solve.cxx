@@ -171,6 +171,23 @@ namespace
     ::operator delete(structs);
   }
 
+  // SDPB_MULTIMODULAR_NODE_PERSIST=1 (diagnostic): keep the node windows
+  // from one call to the next (same sizes), instead of allocating them in
+  // every iteration. Freed at the start of MPI_Finalize, through an
+  // attribute of MPI_COMM_SELF.
+  struct Persistent_Windows
+  {
+    size_t L_records = 0, B_records = 0;
+    std::unique_ptr<Shared_BigFloat_Array> L, B;
+  };
+  Persistent_Windows *persistent_windows = nullptr;
+  int free_persistent_windows(MPI_Comm, int, void *, void *)
+  {
+    delete persistent_windows;
+    persistent_windows = nullptr;
+    return MPI_SUCCESS;
+  }
+
   size_t env_size(const char *name, const size_t default_value)
   {
     const char *value = std::getenv(name);
@@ -271,8 +288,41 @@ void multimodular_node_cholesky_solve(
         ASSERT(position[k] < num_blocks, "block ", index, " not found");
       }
 
-  Shared_BigFloat_Array L_window(node_comm, L_records, false);
-  Shared_BigFloat_Array B_window(node_comm, B_records, false);
+  std::unique_ptr<Shared_BigFloat_Array> L_owned, B_owned;
+  if(env_size("SDPB_MULTIMODULAR_NODE_PERSIST", 0) != 0)
+    {
+      if(persistent_windows == nullptr)
+        {
+          persistent_windows = new Persistent_Windows;
+          int keyval;
+          MPI_Comm_create_keyval(MPI_COMM_NULL_COPY_FN,
+                                 free_persistent_windows, &keyval, nullptr);
+          MPI_Comm_set_attr(MPI_COMM_SELF, keyval, nullptr);
+        }
+      auto &p = *persistent_windows;
+      if(!p.L || p.L_records != L_records || p.B_records != B_records)
+        {
+          p.L.reset();
+          p.B.reset();
+          p.L = std::make_unique<Shared_BigFloat_Array>(node_comm, L_records,
+                                                        false);
+          p.B = std::make_unique<Shared_BigFloat_Array>(node_comm, B_records,
+                                                        false);
+          p.L_records = L_records;
+          p.B_records = B_records;
+        }
+    }
+  else
+    {
+      L_owned = std::make_unique<Shared_BigFloat_Array>(node_comm, L_records,
+                                                        false);
+      B_owned = std::make_unique<Shared_BigFloat_Array>(node_comm, B_records,
+                                                        false);
+    }
+  Shared_BigFloat_Array &L_window
+    = L_owned ? *L_owned : *persistent_windows->L;
+  Shared_BigFloat_Array &B_window
+    = B_owned ? *B_owned : *persistent_windows->B;
   // dynamic: ready[i] counts the grid ranks that have written block i;
   // next[i] is the next job of block i to take
   Shared_Window_Array<int64_t> control(node_comm, 2 * num_blocks + 1);
