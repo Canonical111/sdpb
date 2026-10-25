@@ -1,5 +1,6 @@
 #include "catch2/catch_amalgamated.hpp"
 
+#include "sdp_solve/SDP_Solver/run/multimodular/Multimodular_Block_Factor.hxx"
 #include "sdp_solve/SDP_Solver/run/multimodular/multimodular_blas.hxx"
 #include "unit_tests/util/util.hxx"
 
@@ -10,7 +11,9 @@
 #include <vector>
 
 // Tests for the multimodular BLAS routines:
-// - multimodular GEMM, Cholesky and Trsm against El's BigFloat routines.
+// - multimodular GEMM, Cholesky and Trsm against El's BigFloat routines;
+// - Multimodular_Block_Factor (as used by sdpb --multimodularTrsm) on
+//   distributed blocks, with the factor in shared memory or on every rank.
 
 namespace
 {
@@ -252,5 +255,70 @@ TEST_CASE("multimodular Cholesky and Trsm vs El")
         REQUIRE(bitwise_equal(X, X_flint));
       }
     }
+  }
+}
+
+TEST_CASE("Multimodular_Block_Factor")
+{
+  // A block on all ranks (one node in tests), or on each rank alone
+  const bool all_ranks = GENERATE(true, false);
+  // above Multimodular_Block_Factor::distributed_min_size: the Cholesky
+  // is split over the grid
+  const int n = GENERATE(20, 300);
+  const int width = 40;
+  DYNAMIC_SECTION("all_ranks=" << all_ranks << " n=" << n)
+  {
+    const El::Grid grid(all_ranks ? El::mpi::COMM_WORLD : El::mpi::COMM_SELF);
+    const int precision = El::gmp::Precision();
+
+    // Same S and B on all ranks of the grid: generated on its root
+    El::DistMatrix<El::BigFloat, El::CIRC, El::CIRC> S_root(n, n, grid),
+      B_root(n, width, grid);
+    if(S_root.CrossRank() == S_root.Root())
+      {
+        S_root.Matrix() = random_spd(n);
+        B_root.Matrix() = Test_Util::random_matrix(n, width);
+      }
+    const El::DistMatrix<El::BigFloat> S(S_root), B(B_root);
+
+    // El reference
+    El::DistMatrix<El::BigFloat> L_el(S), X_el(B);
+    El::Cholesky(El::LOWER, L_el);
+    El::Trsm(El::LEFT, El::LOWER, El::NORMAL, El::NON_UNIT, El::BigFloat(1),
+             L_el, X_el);
+
+    Timers timers;
+    std::vector<El::Matrix<El::BigFloat>> L_results, X_results;
+    for(const bool allow_shared : {true, false})
+      {
+        CAPTURE(allow_shared);
+        Multimodular_Block_Factor factor(S, Multimodular_Blas_Config(),
+                                         allow_shared);
+        REQUIRE(factor.shared() == allow_shared);
+        El::DistMatrix<El::BigFloat> L(grid), X(B);
+        factor.cholesky(S, L, timers);
+        factor.solve(X, timers);
+
+        El::DistMatrix<El::BigFloat, El::STAR, El::STAR> L_star(L), X_star(X),
+          L_el_star(L_el), X_el_star(X_el), S_star(S), B_star(B);
+        // Upper triangle as El::Cholesky leaves it
+        for(int j = 0; j < n; ++j)
+          for(int i = 0; i < j; ++i)
+            REQUIRE(L_star.Matrix().CRef(i, j) == S_star.Matrix().CRef(i, j));
+        CHECK(log2_cholesky_backward_error(S_star.Matrix(), L_star.Matrix())
+              < -precision + 8);
+        CHECK(log2_rel_diff(L_star.Matrix(), L_el_star.Matrix(), true)
+              < -precision + 10);
+        CHECK(log2_solve_backward_error(L_star.Matrix(), X_star.Matrix(),
+                                        B_star.Matrix())
+              < -precision + 8);
+        CHECK(log2_rel_diff(X_star.Matrix(), X_el_star.Matrix())
+              < -precision + 10);
+        L_results.push_back(L_star.Matrix());
+        X_results.push_back(X_star.Matrix());
+      }
+    // Shared-memory and per-rank factors: the same arithmetic
+    REQUIRE(bitwise_equal(L_results.at(0), L_results.at(1)));
+    REQUIRE(bitwise_equal(X_results.at(0), X_results.at(1)));
   }
 }

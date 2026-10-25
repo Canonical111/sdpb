@@ -3,6 +3,7 @@
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/Matrix_Normalizer.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/streaming_syrk.hxx"
+#include "sdp_solve/SDP_Solver/run/multimodular/Multimodular_Block_Factor.hxx"
 #include "sdp_solve/memory_estimates.hxx"
 #include "sdpb_util/memory_trace.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
@@ -20,8 +21,8 @@ void initialize_schur_off_diagonal(
   const Environment &env, const SDP &sdp, const Block_Info &block_info,
   Block_Matrix &schur_off_diagonal,
   Block_Diagonal_Matrix &schur_complement_cholesky, Timers &timers,
-  El::Matrix<int32_t> &block_timings_ms, const Verbosity verbosity,
-  const bool cholesky_only = false)
+  El::Matrix<int32_t> &block_timings_ms, const bool multimodular_trsm,
+  const Verbosity verbosity, const bool cholesky_only = false)
 {
   schur_off_diagonal.blocks.clear();
   // Setting correct width is needed for Block_Matrix_Normalizer.
@@ -34,12 +35,23 @@ void initialize_schur_off_diagonal(
     {
       const auto global_block_index = block_info.block_indices.at(block);
       auto block_index_string = std::to_string(global_block_index);
+      // --multimodularTrsm: Cholesky and L^{-1} B with multimodular BLAS,
+      // see SDP_Solver/run/multimodular/Readme.md
+      std::unique_ptr<Multimodular_Block_Factor> multimodular_factor;
+      if(multimodular_trsm)
+        multimodular_factor = std::make_unique<Multimodular_Block_Factor>(
+          schur_complement_cholesky.blocks[block], Multimodular_Blas_Config());
       {
         Scoped_Timer cholesky_timer(timers, "cholesky_" + block_index_string);
         try
           {
-            Cholesky(El::UpperOrLowerNS::LOWER,
-                     schur_complement_cholesky.blocks[block]);
+            if(multimodular_factor)
+              multimodular_factor->cholesky(
+                schur_complement_cholesky.blocks[block],
+                schur_complement_cholesky.blocks[block], timers);
+            else
+              Cholesky(El::UpperOrLowerNS::LOWER,
+                       schur_complement_cholesky.blocks[block]);
           }
         catch(std::exception &e)
           {
@@ -57,10 +69,13 @@ void initialize_schur_off_diagonal(
       Scoped_Timer solve_timer(timers, "solve_" + block_index_string);
 
       schur_off_diagonal.blocks.push_back(sdp.free_var_matrix.blocks[block]);
-      El::Trsm(El::LeftOrRightNS::LEFT, El::UpperOrLowerNS::LOWER,
-               El::OrientationNS::NORMAL, El::UnitOrNonUnitNS::NON_UNIT,
-               El::BigFloat(1), schur_complement_cholesky.blocks[block],
-               schur_off_diagonal.blocks[block]);
+      if(multimodular_factor)
+        multimodular_factor->solve(schur_off_diagonal.blocks[block], timers);
+      else
+        El::Trsm(El::LeftOrRightNS::LEFT, El::UpperOrLowerNS::LOWER,
+                 El::OrientationNS::NORMAL, El::UnitOrNonUnitNS::NON_UNIT,
+                 El::BigFloat(1), schur_complement_cholesky.blocks[block],
+                 schur_off_diagonal.blocks[block]);
       block_timings_ms(global_block_index, 0)
         += solve_timer.elapsed_milliseconds();
     }
@@ -301,7 +316,7 @@ void compute_Q(const Environment &env, const SDP &sdp,
                BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,
                El::DistMatrix<El::BigFloat> &Q, Timers &timers,
                El::Matrix<int32_t> &block_timings_ms,
-               const Verbosity verbosity)
+               const bool multimodular_trsm, const Verbosity verbosity)
 {
   Scoped_Timer timer(timers, "Q");
 
@@ -310,7 +325,8 @@ void compute_Q(const Environment &env, const SDP &sdp,
                          && bigint_syrk_context.can_accumulate_bands(Q);
   initialize_schur_off_diagonal(env, sdp, block_info, schur_off_diagonal,
                                 schur_complement_cholesky, timers,
-                                block_timings_ms, verbosity, streaming);
+                                block_timings_ms, multimodular_trsm, verbosity,
+                                streaming);
   memory_trace(streaming ? "Cholesky done" : "Cholesky and L^{-1} B done");
   if(streaming)
     syrk_Q_streaming(sdp, block_info, schur_complement_cholesky,

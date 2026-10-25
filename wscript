@@ -96,6 +96,7 @@ def build(bld):
                          'src/sdp_solve/SDP_Solver/run/bigint_syrk/Bigint_Syrk_Config.cxx',
                          'src/sdp_solve/SDP_Solver/run/multimodular/multimodular_gemm.cxx',
                          'src/sdp_solve/SDP_Solver/run/multimodular/blocked_cholesky_trsm.cxx',
+                         'src/sdp_solve/SDP_Solver/run/multimodular/Multimodular_Block_Factor.cxx',
                          'src/sdp_solve/SDP_Solver/run/step/compute_search_direction/compute_search_direction.cxx',
                          'src/sdp_solve/SDP_Solver/run/step/compute_search_direction/compute_schur_RHS.cxx',
                          'src/sdp_solve/SDP_Solver/run/step/compute_search_direction/solve_schur_complement_equation.cxx',
