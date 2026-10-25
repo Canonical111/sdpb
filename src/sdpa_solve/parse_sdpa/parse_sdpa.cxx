@@ -699,13 +699,17 @@ namespace Sdpb::Sdpa
     }
   }
 
-  bool use_sdpa_indexed_reader(const std::filesystem::path &input_file)
+  int sdpa_indexed_reader_mode(const std::filesystem::path &input_file)
   {
     const char *env = std::getenv("LAB_SDPA_INDEXED_READER");
-    if(env == nullptr || std::string(env) != "1")
-      return false;
-    return input_file.extension() == ".dat-s"
-           && fs::is_regular_file(input_file);
+    if(env == nullptr)
+      return 0;
+    const std::string value(env);
+    if(value != "1" && value != "2")
+      return 0;
+    if(input_file.extension() != ".dat-s" || !fs::is_regular_file(input_file))
+      return 0;
+    return std::stoi(value);
   }
 
   SDPA_Sparse_Index
@@ -744,6 +748,8 @@ namespace Sdpb::Sdpa
     ASSERT_EQUAL(header.size(), 4 + nblocks);
     const std::vector<int> block_sizes(header.begin() + 4, header.end());
     const SDPA_Block_Structure block_structure(m, nblocks, block_sizes);
+    index.m_dim = m;
+    index.input_block_sizes = block_sizes;
     ASSERT(index.data_begin <= index.file_size);
 
     // Each rank scans the lines starting in its share of the entry bytes.
@@ -855,5 +861,107 @@ namespace Sdpb::Sdpa
         };
     return read_sdpa(header_stream, SDPA_File_Type::sparse, should_parse_block,
                      read_entries);
+  }
+
+  std::vector<El::BigFloat>
+  read_sdpa_objective(const std::filesystem::path &input_file)
+  {
+    std::optional<SDPA_Block_Structure> block_structure;
+    std::vector<El::BigFloat> c_objective;
+    read_header(input_file, block_structure, c_objective);
+    return c_objective;
+  }
+
+  void read_sdpa_lines(
+    const std::filesystem::path &input_file, const SDPA_Sparse_Index &index,
+    const size_t run_begin, const size_t run_end, const size_t begin,
+    const size_t end,
+    const std::function<void(size_t block_index, size_t matrix_index,
+                             size_t i, size_t j, const El::BigFloat &value)>
+      &accept)
+  {
+    ASSERT(run_begin <= begin && begin <= end && end <= run_end,
+           DEBUG_STRING(run_begin), DEBUG_STRING(begin), DEBUG_STRING(end),
+           DEBUG_STRING(run_end));
+    if(begin == end)
+      return;
+    const SDPA_Block_Structure block_structure(
+      index.m_dim, index.input_block_sizes.size(), index.input_block_sizes);
+    const Posix_File file(input_file);
+    std::vector<char> small(4096);
+
+    // Position of the first '\n' at or after pos (or run_end), plus one.
+    const auto after_newline = [&](size_t pos) {
+      while(pos < run_end)
+        {
+          const size_t n
+            = file.read(small.data(), std::min(small.size(), run_end - pos),
+                        pos);
+          ASSERT(n > 0);
+          const auto *nl
+            = static_cast<const char *>(std::memchr(small.data(), '\n', n));
+          if(nl != nullptr)
+            return pos + (nl - small.data()) + 1;
+          pos += n;
+        }
+      return run_end;
+    };
+    // Lines starting in [begin, end): from the first line start >= begin
+    // to the end of the line that contains end - 1.
+    size_t start = begin;
+    if(begin > run_begin)
+      {
+        char previous;
+        ASSERT_EQUAL(file.read(&previous, 1, begin - 1), 1);
+        if(previous != '\n')
+          start = after_newline(begin);
+      }
+    if(start >= end)
+      return;
+    const size_t stop = after_newline(end - 1);
+
+    const std::function<void(SDPA_Matrix_Entry &&)> accept_entry
+      = [&](SDPA_Matrix_Entry &&sdpa_entry) {
+          const Result_Matrix_Entry entry(sdpa_entry, block_structure);
+          accept(entry.sdp_block_index, entry.vector_index, entry.i, entry.j,
+                 entry.value);
+        };
+    const std::function<bool(const SDPA_Matrix_Entry &)> wanted
+      = [](const SDPA_Matrix_Entry &) { return true; };
+
+    // Sized to the range: this is called once per run and slice.
+    std::vector<char> buffer(std::min(index_chunk_bytes, stop - start));
+    size_t pos = start;
+    while(pos < stop)
+      {
+        const size_t want = std::min(buffer.size(), stop - pos);
+        ASSERT_EQUAL(file.read(buffer.data(), want, pos), want,
+                     "Short read from ", input_file);
+        size_t n = want;
+        if(pos + want < stop)
+          {
+            const char *last = nullptr;
+            for(size_t k = want; k > 0; --k)
+              if(buffer[k - 1] == '\n')
+                {
+                  last = buffer.data() + k;
+                  break;
+                }
+            ASSERT(last != nullptr, "SDPA line longer than ",
+                   index_chunk_bytes, " bytes at offset ", pos);
+            n = last - buffer.data();
+          }
+        const bool blank
+          = std::all_of(buffer.data(), buffer.data() + n, [](const char c) {
+              return std::isspace(static_cast<unsigned char>(c));
+            });
+        if(!blank)
+          {
+            boost::iostreams::stream<boost::iostreams::array_source> chunk(
+              buffer.data(), n);
+            read_sparse_matrices(chunk, accept_entry, wanted);
+          }
+        pos += n;
+      }
   }
 }

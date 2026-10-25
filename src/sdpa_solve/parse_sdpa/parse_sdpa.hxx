@@ -31,10 +31,16 @@ struct SDPA_Sparse_Index
   size_t file_size = 0;
   // All runs of the file, in file order
   std::vector<SDPA_Block_Run> runs;
+  // Header (m, SDPA block sizes; negative for diagonal blocks)
+  size_t m_dim = 0;
+  std::vector<int> input_block_sizes;
 };
 
-// True if LAB_SDPA_INDEXED_READER=1 and input_file is a plain .dat-s file.
-bool use_sdpa_indexed_reader(const std::filesystem::path &input_file);
+// LAB_SDPA_INDEXED_READER=1 or 2 for a plain .dat-s file; 0 otherwise.
+// 1: group roots read their own runs (read_sdpa_indexed).
+// 2: all ranks of a group parse slices of its runs and send each entry to
+//    the rank that owns it (read_sdpa_lines, in SDP.cxx).
+int sdpa_indexed_reader_mode(const std::filesystem::path &input_file);
 
 // Collective over comm: each rank scans 1/comm.Size() of the file;
 // the runs are gathered on all ranks.
@@ -46,4 +52,18 @@ build_sdpa_sparse_index(const std::filesystem::path &input_file,
 SDPA_File_Parse_Result read_sdpa_indexed(
   const std::filesystem::path &input_file, const SDPA_Sparse_Index &index,
   const std::function<bool(size_t matrix_index)> &should_parse_block);
+
+// Objective c_1..c_m (reads only the header).
+std::vector<El::BigFloat>
+read_sdpa_objective(const std::filesystem::path &input_file);
+
+// Parse the entry lines that start in [begin, end), a range inside the run
+// [run_begin, run_end), in file order, with the same parser as read_sdpa().
+// accept(block_index, matrix_index, i, j, value): solver block, 0..m, and the
+// position inside the block (not mirrored).
+void read_sdpa_lines(
+  const std::filesystem::path &input_file, const SDPA_Sparse_Index &index,
+  size_t run_begin, size_t run_end, size_t begin, size_t end,
+  const std::function<void(size_t block_index, size_t matrix_index, size_t i,
+                           size_t j, const El::BigFloat &value)> &accept);
 }
