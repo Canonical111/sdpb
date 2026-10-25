@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "Solver_Run_Config.hxx"
 
 #include "sdpa_solve/SDP_Solver.hxx"
@@ -151,7 +152,18 @@ namespace Sdpb::Sdpa
               ALLOC(S, sizes.S_bytes);
               {
                 FUNC_SCOPE(compute_S);
-                ALLOC(P, p_cfg.node_P_bytes());
+                // #184: P is packed into integer records as it is produced
+                // (resident only with the RAM backend; ~0 when SDPB_P_SPILL_DIR
+                // sends it to a file), and only one chunk of BigFloat P exists
+                // at a time (see the p_range scope below).
+                const size_t P_record_bytes
+                  = 8 * ((El::gmp::Precision() + 1 + 63) / 64 + 1);
+                const size_t P_elements
+                  = p_cfg.node_P_bytes() / bigfloat_bytes();
+                NAMED_ALLOC(P_spill, "P (packed spill)",
+                            std::getenv("SDPB_P_SPILL_DIR") == nullptr
+                              ? P_elements * P_record_bytes
+                              : 0);
                 // Temporary allocations inside initialize_P()
                 {
                   FUNC_SCOPE(initialize_P);
@@ -166,6 +178,8 @@ namespace Sdpb::Sdpa
                   {
                     NAMED_SCOPE(p_range, "loop over p index");
                     ALLOC(G, p_cfg.node_G_bytes());
+                    NAMED_ALLOC(P_chunk, "P chunk (BigFloat)",
+                                p_cfg.node_P_bytes() / p_cfg.split_factor);
                     {
                       FUNC_SCOPE(trmm);
                       ALLOC(G_normalizer, p_cfg.node_G_Normalizer_bytes());
