@@ -1,3 +1,4 @@
+#include "lab_dump_S.hxx"
 #include "update_cond_numbers.hxx"
 #include "sdp_solve/Block_Matrix/Block_Diagonal_Matrix.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
@@ -72,6 +73,14 @@ namespace Sdpb::Sdpa
 
       compute_S(env, sdp, block_info, X_cholesky, Y_cholesky, grid,
                 compute_S_context, S, timers, block_timings_ms, verbosity);
+      // lab (agent), bfss #74: opt-in dump of S and of its Cholesky diagonal, then stop.
+      if(lab::dump_S_requested())
+        {
+          lab::dump_S_and_cholesky(S);
+          terminate_now = true;
+          El::AllReduce(block_timings_ms, El::mpi::COMM_WORLD);
+          return;
+        }
       try
         {
           Scoped_Timer Cholesky_timer(timers, "Cholesky_S");
