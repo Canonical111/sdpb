@@ -30,7 +30,7 @@
 // Inputs:
 // - BilinearPairingsXInv, BilinearPairingsY (these are members of
 //   SDPSolver, but we include them as arguments to emphasize that
-//   they must be computed first)
+//   they must be computed first). They are freed once S is formed.
 // Outputs (members of SDPSolver which are modified by this method and
 // used later):
 // - SchurComplementCholesky (S is computed in place and factorized in place,
@@ -58,10 +58,10 @@ void compute_Q(const Environment &env, const SDP &sdp,
 
 void initialize_schur_complement_solver(
   const Environment &env, const Block_Info &block_info, const SDP &sdp,
-  const std::array<
+  std::array<
     std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
     &A_X_inv,
-  const std::array<
+  std::array<
     std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
     &A_Y,
   const El::Grid &group_grid, Block_Diagonal_Matrix &schur_complement_cholesky,
@@ -81,6 +81,14 @@ void initialize_schur_complement_solver(
   // (sum_j dim(S_j)^2 BigFloats) at the memory peak; results are unchanged.
   compute_schur_complement(block_info, A_X_inv, A_Y, schur_complement_cholesky,
                            timers);
+
+  // A_X_inv and A_Y are not needed after S is formed (compute_bilinear_pairings()
+  // rebuilds them from scratch every iteration). Free them before L^{-1} B is
+  // allocated, so that they do not add to the memory peak.
+  for(auto &parity : A_X_inv)
+    parity.clear();
+  for(auto &parity : A_Y)
+    parity.clear();
 
   compute_Q(env, sdp, block_info, schur_off_diagonal,
             schur_complement_cholesky, bigint_syrk_context, Q, timers,

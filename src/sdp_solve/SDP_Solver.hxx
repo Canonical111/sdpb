@@ -97,10 +97,10 @@ public:
     const SDP &sdp, const El::Grid &grid,
     const Block_Diagonal_Matrix &X_cholesky,
     const Block_Diagonal_Matrix &Y_cholesky,
-    const std::array<
+    std::array<
       std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
       &A_X_inv,
-    const std::array<
+    std::array<
       std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
       &A_Y,
     const Block_Vector &primal_residue_p,
