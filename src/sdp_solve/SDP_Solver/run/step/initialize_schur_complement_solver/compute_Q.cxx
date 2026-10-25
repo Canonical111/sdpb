@@ -44,7 +44,7 @@ namespace
   }
 
   void maybe_dump_block(const El::DistMatrix<El::BigFloat> &schur,
-                        const El::DistMatrix<El::BigFloat> &B,
+                        const SDP &sdp, size_t block,
                         size_t global_block_index, int iteration)
   {
     const char *block_env = std::getenv("SDPB_DUMP_BLOCK");
@@ -59,7 +59,9 @@ namespace
     std::string suffix = std::to_string(global_block_index) + "_iter"
                          + std::to_string(iteration) + ".bin";
     dump_matrix(schur, std::string(dir_env) + "/schur_" + suffix);
-    dump_matrix(B, std::string(dir_env) + "/B_" + suffix);
+    El::DistMatrix<El::BigFloat> B_scratch;
+    dump_matrix(sdp.free_var_block(block, B_scratch),
+                std::string(dir_env) + "/B_" + suffix);
   }
 
   // Multimodular per-block Cholesky and Trsm (lab #145), enabled by
@@ -738,9 +740,8 @@ void initialize_schur_off_diagonal(
           schur_complement.blocks[block].Grid().Size(),
           " ranks: multimodular\n");
       {
-        maybe_dump_block(schur_complement.blocks[block],
-                         sdp.free_var_matrix.blocks[block], global_block_index,
-                         iteration);
+        maybe_dump_block(schur_complement.blocks[block], sdp, block,
+                         global_block_index, iteration);
         Scoped_Timer cholesky_timer(timers, "cholesky_" + block_index_string);
         try
           {
@@ -777,7 +778,7 @@ void initialize_schur_off_diagonal(
       // schur_off_diagonal = L^{-1} B
       Scoped_Timer solve_timer(timers, "solve_" + block_index_string);
 
-      schur_off_diagonal.blocks.push_back(sdp.free_var_matrix.blocks[block]);
+      schur_off_diagonal.blocks.push_back(sdp.free_var_block_copy(block));
       if(use_multimodular)
         {
           if(use_shared)

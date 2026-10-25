@@ -112,7 +112,8 @@ def build(bld):
                          'src/sdp_solve/SDP_Solver_Terminate_Reason.cxx',
                          'src/sdp_solve/lower_triangular_transpose_solve.cxx',
                          'src/sdp_solve/Block_Diagonal_Matrix.cxx',
-                         'src/sdp_solve/Write_Solution.cxx']
+                         'src/sdp_solve/Write_Solution.cxx',
+                         'src/sdp_solve/Sparse_Block_Matrix.cxx']
 
     bld.stlib(source=sdp_solve_sources,
               target='sdp_solve',

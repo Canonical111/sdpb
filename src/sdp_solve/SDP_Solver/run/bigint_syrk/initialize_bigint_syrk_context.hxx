@@ -88,10 +88,10 @@ struct Grouped_Block_Size_Info
             // Total height for all blocks on group_comm.
             // Since all ranks of group_comm share the same blocks,
             // It's enough to calculate it on group root only.
-            blocks_height_per_group.at(i) = std::transform_reduce(
-              sdp.free_var_matrix.blocks.begin(),
-              sdp.free_var_matrix.blocks.end(), 0, std::plus{},
-              [](const auto &block) { return block.Height(); });
+            for(size_t index = 0; index < sdp.free_var_matrix.blocks.size();
+                ++index)
+              blocks_height_per_group.at(i)
+                += sdp.free_var_block_height(index);
           }
       }
     El::mpi::AllReduce(blocks_height_per_group.data(), num_groups,
