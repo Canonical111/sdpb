@@ -21,7 +21,11 @@ namespace Sdpb::Sdpa
         const auto &per_block = sdp.sparse_F.entries.at(local_block);
         for(size_t p = 0; p < m; ++p)
           {
-            sparse_dotu_local_update(per_block.at(p), Z_block, traces.at(p));
+            // Per-block subtotal first, like dotu() over Block_Diagonal_Matrix:
+            // the summation tree (and so the rounding) matches the dense path.
+            El::BigFloat block_sum(0);
+            sparse_dotu_local_update(per_block.at(p), Z_block, block_sum);
+            traces.at(p) += block_sum;
           }
       }
     El::mpi::AllReduce(traces.data(), m, El::mpi::SUM, El::mpi::COMM_WORLD);
