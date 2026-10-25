@@ -137,6 +137,16 @@ def build(bld):
                 use=use_packages + ['sdp_solve', 'mpsolve']
                 )
 
+    # Lab tool (not for the PR): benchmark/accuracy check of the multimodular
+    # Cholesky/Trsm on dumped blocks (dsd-lab-playground/bootstrap-speed#145, #176)
+    bld.program(source=['src/mm_trsm_bench/main.cxx'],
+                target='mm_trsm_bench',
+                cxxflags=default_flags,
+                defines=default_defines,
+                includes=default_includes,
+                use=use_packages + ['sdp_solve']
+                )
+
     pmp2sdp_sources = ['src/pmp2sdp/Dual_Constraint_Group/Dual_Constraint_Group.cxx',
                        'src/pmp2sdp/Dual_Constraint_Group/sample_bilinear_basis.cxx',
                        'src/pmp2sdp/Output_SDP/Output_SDP.cxx',

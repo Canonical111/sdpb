@@ -6,6 +6,24 @@
 #include "sdp_solve/memory_estimates.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
+#include <cstdlib>
+
+// Lab bench branch only (#176): SDPB_MULTIMODULAR_BASE and
+// SDPB_MULTIMODULAR_DIST_MIN override the defaults, to force the multimodular
+// GEMM and the distributed Cholesky on small test SDPs (cT nmax6).
+namespace
+{
+  Multimodular_Blas_Config lab_bench_config()
+  {
+    Multimodular_Blas_Config config;
+    if(const char *base = std::getenv("SDPB_MULTIMODULAR_BASE"))
+      config.base_size = std::atoi(base);
+    if(const char *dist = std::getenv("SDPB_MULTIMODULAR_DIST_MIN"))
+      Multimodular_Block_Factor::distributed_min_size = std::atoi(dist);
+    return config;
+  }
+}
+
 // schur_off_diagonal = L^{-1} B
 void initialize_schur_off_diagonal(
   const Environment &env, const SDP &sdp, const Block_Info &block_info,
@@ -28,7 +46,7 @@ void initialize_schur_off_diagonal(
       std::unique_ptr<Multimodular_Block_Factor> multimodular_factor;
       if(multimodular_trsm)
         multimodular_factor = std::make_unique<Multimodular_Block_Factor>(
-          schur_complement.blocks[block], Multimodular_Blas_Config());
+          schur_complement.blocks[block], lab_bench_config());
       {
         Scoped_Timer cholesky_timer(timers, "cholesky_" + block_index_string);
         try

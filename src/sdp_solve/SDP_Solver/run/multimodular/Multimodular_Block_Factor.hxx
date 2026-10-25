@@ -19,7 +19,7 @@ class Multimodular_Block_Factor
 {
 public:
   // Cholesky levels of at least this many rows are split over the grid
-  static constexpr int distributed_min_size = 256;
+  static inline int distributed_min_size = 256; // lab bench branch: settable
 
   // allow_shared = false: a copy per rank even on one node (for tests)
   Multimodular_Block_Factor(const El::DistMatrix<El::BigFloat> &schur,
