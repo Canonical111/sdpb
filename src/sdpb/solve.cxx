@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <filesystem>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -44,12 +45,30 @@ Timers solve(const Block_Info &block_info, const SDPB_Parameters &parameters,
           counts[0] += B_block.num_nonzeros_local();
           counts[1] += B_block.dense_size_local();
         }
-      El::mpi::AllReduce(counts, 2, El::mpi::SUM, El::mpi::COMM_WORLD);
+      // Per rank, for memory checks (debug): nonzeros/dense elements
+      std::vector<size_t> per_rank(2 * El::mpi::Size(), 0);
+      per_rank[2 * El::mpi::Rank()] = counts[0];
+      per_rank[2 * El::mpi::Rank() + 1] = counts[1];
+      El::mpi::AllReduce(per_rank.data(), per_rank.size(), El::mpi::SUM,
+                         El::mpi::COMM_WORLD);
+      counts[0] = counts[1] = 0;
+      std::ostringstream ranks_ss;
+      for(int rank = 0; rank < El::mpi::Size(); ++rank)
+        {
+          counts[0] += per_rank[2 * rank];
+          counts[1] += per_rank[2 * rank + 1];
+          ranks_ss << " " << rank << ":" << per_rank[2 * rank] << "/"
+                   << per_rank[2 * rank + 1];
+        }
       if(El::mpi::Rank() == 0)
-        El::Output("sparseB: B has ", counts[0], " nonzero elements of ",
-                   counts[1], " (density ",
-                   counts[1] == 0 ? 0.0 : double(counts[0]) / counts[1],
-                   ")");
+        {
+          El::Output("sparseB: B has ", counts[0], " nonzero elements of ",
+                     counts[1], " (density ",
+                     counts[1] == 0 ? 0.0 : double(counts[0]) / counts[1],
+                     ")");
+          if(parameters.verbosity >= Verbosity::debug)
+            El::Output("sparseB: per rank nonzeros/dense:", ranks_ss.str());
+        }
     }
   if(parameters.verbosity >= Verbosity::debug)
     {
