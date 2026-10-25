@@ -76,7 +76,8 @@ namespace Blas_Residues
     // t0 <= (bits - 117) / 24 bounds the error (see blas_residues.hxx).
     // A multiple of 8 makes 24 t0 a multiple of 64: the result is then
     // aligned to limbs as the exact integer, so that its truncation to mpf
-    // keeps the same limbs as FLINT's CRT would (bitwise equal results).
+    // is at the same bit as for FLINT's CRT. The results then usually
+    // agree bit for bit, but not always (see blas_residues.hxx).
     t0 = std::max<long>(0, (bits - 117) / chunk_bits);
     t0 -= t0 % 8;
     const long M_bits = fmpz_bits(M);
