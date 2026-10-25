@@ -25,7 +25,9 @@ namespace Sdpb::Sdpa
 
     // For each MPI group, rank=0 parses objective_c and the blocks for F_0..F_m that belong to this group.
     // Other ranks do not parse anything.
-    const auto parse_result = [&] {
+    // Non-const deliberately (#184): parsed triplet lists are cleared block by block as they
+    // are consumed, so the parse copy and the solver copy never coexist in full.
+    auto parse_result = [&] {
       if(comm.Rank() == 0)
         {
           Scoped_Timer parse_timer(timers, "parse");
