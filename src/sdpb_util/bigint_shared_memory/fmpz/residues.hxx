@@ -11,3 +11,8 @@ void bigint_to_residues(const Fmpz_BigInt &input, const Fmpz_Comb &comb,
 void residues_to_bigint(const double *residues, size_t stride, Fmpz_Comb &comb,
                         std::vector<mp_limb_t> &residues_buffer_temp,
                         Fmpz_BigInt &output);
+
+// Residues of input modulo comb's primes, as doubles out[0], out[stride], ...
+// (also used by the BLAS residues' unit tests)
+void fmpz_multi_mod_uint32_stride(double *out, slong stride,
+                                  const fmpz_t &input, const Fmpz_Comb &comb);
