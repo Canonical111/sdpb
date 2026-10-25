@@ -10,6 +10,9 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <filesystem>
 #include <sstream>
+#ifdef __linux__
+#include <malloc.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -35,6 +38,13 @@ Timers solve(const Block_Info &block_info, const SDPB_Parameters &parameters,
   Scoped_Timer read_sdp_timer(timers, "read_sdp");
   SDP sdp(parameters.sdp_path, block_info, grid, timers,
           parameters.solver.sparse_B);
+#ifdef __GLIBC__ // malloc_trim() is glibc's
+  // Reading the SDP leaves freed memory in the heap: each multi-rank block's
+  // root parses the whole block and queues a second copy for the scatter
+  // (read_block_data, copy_matrix_from_root), but later keeps only its share.
+  // Return those pages to the OS.
+  malloc_trim(0);
+#endif
   if(parameters.solver.sparse_B
      && parameters.verbosity >= Verbosity::regular)
     {
