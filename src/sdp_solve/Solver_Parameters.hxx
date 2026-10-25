@@ -19,6 +19,9 @@ struct Solver_Parameters
   // Per-block Cholesky and L^{-1}B by multimodular BLAS,
   // see sdp_solve/SDP_Solver/run/multimodular/Readme.md
   bool multimodular_trsm = false;
+  // Experimental (lab #164): store the free variable matrix B compactly
+  // (nonzero elements only), see sdp_solve/Sparse_Block_Matrix.hxx
+  bool sparse_B = false;
   size_t precision;
 
   El::BigFloat duality_gap_threshold, primal_error_threshold,

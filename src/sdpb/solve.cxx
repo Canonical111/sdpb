@@ -32,7 +32,25 @@ Timers solve(const Block_Info &block_info, const SDPB_Parameters &parameters,
   El::Grid grid(block_info.mpi_comm.value);
 
   Scoped_Timer read_sdp_timer(timers, "read_sdp");
-  SDP sdp(parameters.sdp_path, block_info, grid, timers);
+  SDP sdp(parameters.sdp_path, block_info, grid, timers,
+          parameters.solver.sparse_B);
+  if(parameters.solver.sparse_B
+     && parameters.verbosity >= Verbosity::regular)
+    {
+      // Density of B, over all blocks
+      size_t counts[2] = {0, 0};
+      for(const auto &B_block : sdp.free_var_matrix_sparse)
+        {
+          counts[0] += B_block.num_nonzeros_local();
+          counts[1] += B_block.dense_size_local();
+        }
+      El::mpi::AllReduce(counts, 2, El::mpi::SUM, El::mpi::COMM_WORLD);
+      if(El::mpi::Rank() == 0)
+        El::Output("sparseB: B has ", counts[0], " nonzero elements of ",
+                   counts[1], " (density ",
+                   counts[1] == 0 ? 0.0 : double(counts[0]) / counts[1],
+                   ")");
+    }
   if(parameters.verbosity >= Verbosity::debug)
     {
       print_allocation_message_per_node(env, "SDP", get_allocated_bytes(sdp));
