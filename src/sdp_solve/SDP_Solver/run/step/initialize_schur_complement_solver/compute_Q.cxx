@@ -787,6 +787,18 @@ void initialize_schur_off_diagonal(
             multimodular_solve(L_full, schur_off_diagonal.blocks[block],
                                timers);
         }
+      else if(env_int("SDPB_INVERSE_TRSM", 0) != 0)
+        {
+          // lab #175, accuracy test only: L^{-1} B through an explicit
+          // inverse, as sdpa-solver's compute_S (El::TriangularInverse),
+          // multiplied in BigFloat (El::Trmm). Slow.
+          El::DistMatrix<El::BigFloat> L_inv(
+            schur_complement_cholesky.blocks[block]);
+          El::MakeTrapezoidal(El::LOWER, L_inv);
+          El::TriangularInverse(El::LOWER, El::NON_UNIT, L_inv);
+          El::Trmm(El::LEFT, El::LOWER, El::NORMAL, El::NON_UNIT,
+                   El::BigFloat(1), L_inv, schur_off_diagonal.blocks[block]);
+        }
       else
         {
           El::Trsm(El::LeftOrRightNS::LEFT, El::UpperOrLowerNS::LOWER,
