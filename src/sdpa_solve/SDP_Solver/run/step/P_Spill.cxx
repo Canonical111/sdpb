@@ -18,6 +18,10 @@ namespace Sdpb::Sdpa
       scratch.from_BigFloat(value);
       const auto sign = static_cast<long long>(fmpz_sgn(scratch.value));
       std::memcpy(out, &sign, 8);
+      // fmpz_get_ui_array requires a NONNEGATIVE value (a negative one silently
+      // exports zero limbs); the sign travels separately in the record header.
+      if(sign < 0)
+        fmpz_abs(scratch.value, scratch.value);
       auto *limbs = reinterpret_cast<mp_limb_t *>(out + 8);
       const size_t size = fmpz_size(scratch.value);
       ASSERT(size <= limbs_per_record,

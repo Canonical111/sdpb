@@ -266,17 +266,36 @@ namespace Sdpb::Sdpa
                   El::Range<El::Int>(0, static_cast<El::Int>(chunk_width)),
                   rt);
                 El::BigFloat max_diff(0);
+                bool first_reported = false;
                 for(El::Int jLoc = 0; jLoc < rt.LocalWidth(); ++jLoc)
                   for(El::Int iLoc = 0; iLoc < rt.LocalHeight(); ++iLoc)
                     {
                       const auto diff
                         = rt.GetLocalCRef(iLoc, jLoc)
                           - chunk_block.GetLocalCRef(iLoc, jLoc);
+                      if(El::Abs(diff) > El::BigFloat(1) && !first_reported)
+                        {
+                          first_reported = true;
+                          El::Output(
+                            "SPILL_DEBUG B1: block ", block, " first bad (i=",
+                            iLoc, ",j=", jLoc, ") old=",
+                            chunk_block.GetLocalCRef(iLoc, jLoc),
+                            " new=", rt.GetLocalCRef(iLoc, jLoc),
+                            " old(i+1)=",
+                            iLoc + 1 < rt.LocalHeight()
+                              ? chunk_block.GetLocalCRef(iLoc + 1, jLoc)
+                              : El::BigFloat(-999),
+                            " old(j+1)=",
+                            jLoc + 1 < rt.LocalWidth()
+                              ? chunk_block.GetLocalCRef(iLoc, jLoc + 1)
+                              : El::BigFloat(-999));
+                        }
                       if(El::Abs(diff) > max_diff)
                         max_diff = El::Abs(diff);
                     }
-                if(block < 3 || max_diff != El::BigFloat(0))
-                  El::Output("SPILL_DEBUG B: block ", block,
+                if(block < 3 || max_diff > El::BigFloat(1))
+                  El::Output("SPILL_DEBUG B: block ", block, " h=",
+                             chunk_block.Height(),
                              " roundtrip max |new - old| = ", max_diff);
               }
           }
