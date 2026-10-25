@@ -33,7 +33,8 @@ diagonal blocks (at most 32 x 32) need divisions and square roots, and those sta
    chunks are added up with carries. Chunks below 2^(24 t0) are not formed; the error this leaves is ~2^89 below
    the fixed-point truncation of step 1. t0 is a multiple of 8 (whole limbs), so the results agree bit for bit
    with FLINT's exact `fmpz_multi_CRT_ui` (`Multimodular_Blas_Config::flint_crt`, used by the unit tests).
-   It is ~9x faster than FLINT's per-element CRT.
+   On the same data and in the same loop, the restore step (CRT, conversion to BigFloat, update of C) takes 2.3 s
+   instead of 6.1 s with FLINT's CRT (975 x 975 Cholesky + Trsm with 1834 columns, 1024 bits, one core).
 5. C_ij -= c_ij 2^(e_i + e_j − 2 bits).
 
 `multimodular_cholesky_lower` (`blocked_cholesky_trsm.cxx`): recursive halving; A11 → chol, L21 = A21 L11^{-T},
@@ -97,5 +98,5 @@ nmax=10 stress-tensor SDP, 1024 bits (dsd-lab-playground/bootstrap-speed `calc/s
 `calc/sdpb_mm_vs_sdpa_trmm`, `calc/sdpb_mm_pr`):
 - Kernel, block 975 x 1834, one core: Cholesky + Trsm 35 s vs El's 362 s. Backward errors at El's level (2^-1021)
   against a 2048-bit MPFR reference, also at late iterations with κ(S) ~ 2^330.
-- One node, 128 ranks (`srun`, `--maxSharedMemory=16G`): 54 s/iteration vs 110 s, iterations equal to El's in
-  every printed column.
+- One node, 128 ranks (`srun`, `--maxSharedMemory=16G`), same node: 54.0 s/iteration vs El's 107.5 s, iterations
+  equal to El's in every printed column.
