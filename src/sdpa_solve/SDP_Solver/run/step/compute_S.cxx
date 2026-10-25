@@ -93,11 +93,22 @@ namespace Sdpb::Sdpa
         const size_t p_end = p_range.end;
         Scoped_Timer p_timer(timers,
                              El::BuildString("p_", p_begin, "_", p_end));
+        // #184: densify this chunk of F from the sparse triplets. The chunk is the only
+        // dense copy of F data that ever exists now, and it is bounded by the split factor.
         std::vector<Block_Diagonal_Matrix> G;
         G.reserve(p_end - p_begin);
-        const auto F_begin = sdp.sdp_blocks_F.begin() + p_begin;
-        const auto F_end = sdp.sdp_blocks_F.begin() + p_end;
-        G.insert(G.end(), F_begin, F_end);
+        for(size_t p = p_begin; p < p_end; ++p)
+          {
+            auto &G_p = G.emplace_back(block_info.block_dimensions,
+                                       block_info.block_indices, grid);
+            for(size_t local_block = 0;
+                local_block < sdp.sparse_F.entries.size(); ++local_block)
+              {
+                sparse_densify_local(
+                  sdp.sparse_F.entries.at(local_block).at(p),
+                  G_p.blocks.at(local_block));
+              }
+          }
         if(verbosity >= Verbosity::trace && p_begin == 0)
           {
             print_allocation_message_per_node(env, "G",

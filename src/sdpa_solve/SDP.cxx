@@ -4,7 +4,9 @@
 #include "sdpb_util/assert.hxx"
 #include "sdpb_util/copy_matrix.hxx"
 
+#include <algorithm>
 #include <filesystem>
+#include <tuple>
 
 namespace fs = std::filesystem;
 
@@ -55,37 +57,96 @@ namespace Sdpb::Sdpa
         primal_objective_c = c_circ_circ;
       }
 
-      // Prepare F_0 and F_i structure
+      // Prepare F_0 (dense, one matrix) and the sparse F_1..F_m triplet lists (#184).
       {
         sdp_block_F_0 = Block_Diagonal_Matrix(block_info.block_dimensions,
                                               block_info.block_indices, grid);
-        sdp_blocks_F.reserve(m);
-        for(size_t i = 0; i < m; ++i)
-          {
-            sdp_blocks_F.emplace_back(block_info.block_dimensions,
-                                      block_info.block_indices, grid);
-          }
+        sparse_F.primal_dimension = m;
+        sparse_F.entries.resize(block_info.num_blocks_local());
+        for(auto &per_block : sparse_F.entries)
+          per_block.resize(m);
       }
 
-      // Synchronize F_0 and F_i blocks
+      // Synchronize the triplets: group rank 0 parsed them; broadcast per local block.
+      // Every rank of the block's grid keeps the full (small) list; dense operands stay
+      // distributed and consumers only touch locally-owned elements.
       for(size_t local_block_index = 0;
           local_block_index < block_info.num_blocks_local();
           ++local_block_index)
         {
           const auto block_index
             = block_info.block_indices.at(local_block_index);
-          // Run over F_0, F_1..F_m
-          // NB: sdp_blocks_F[i] corresponds to parsed_block[i+1]
-          // since F_0 is not in sdp_blocks_F
-          for(size_t i = 0; i <= m; ++i)
+
+          // Sort rank-0's entries into (constraint, col, row) order. Column-major per
+          // constraint is the order the dense loops visited elements in, which keeps
+          // single-grid BigFloat accumulations bit-identical to the dense implementation.
+          // A duplicate (constraint,row,col) in the input overwrote under the dense reader;
+          // keep the last occurrence to preserve that behaviour.
+          std::vector<Parsed_F_Entry> sorted_entries;
+          if(comm.Rank() == 0)
             {
-              const auto &source
-                = comm.Rank() == 0
-                    ? parse_result.parsed_blocks.at(block_index).at(i)
-                    : El::Matrix<El::BigFloat>();
-              auto &F = i == 0 ? sdp_block_F_0 : sdp_blocks_F.at(i - 1);
-              auto &dest = F.blocks.at(local_block_index);
-              copy_matrix_from_root(source, dest, comm);
+              auto &parsed
+                = parse_result.parsed_block_entries.at(block_index);
+              std::stable_sort(parsed.begin(), parsed.end(),
+                               [](const auto &a, const auto &b) {
+                                 return std::tie(a.constraint, a.col, a.row)
+                                        < std::tie(b.constraint, b.col, b.row);
+                               });
+              for(const auto &e : parsed)
+                {
+                  if(!sorted_entries.empty()
+                     && sorted_entries.back().constraint == e.constraint
+                     && sorted_entries.back().row == e.row
+                     && sorted_entries.back().col == e.col)
+                    sorted_entries.back().value = e.value;
+                  else
+                    sorted_entries.push_back(e);
+                }
+              parsed.clear();
+              parsed.shrink_to_fit();
+            }
+
+          // Broadcast count, index arrays, and values over the group communicator.
+          long long count = static_cast<long long>(sorted_entries.size());
+          El::mpi::Broadcast(count, 0, comm);
+          std::vector<El::Int> constraints(count), rows(count), cols(count);
+          std::vector<El::BigFloat> values(count);
+          if(comm.Rank() == 0)
+            for(size_t k = 0; k < count; ++k)
+              {
+                constraints.at(k)
+                  = static_cast<El::Int>(sorted_entries.at(k).constraint);
+                rows.at(k) = sorted_entries.at(k).row;
+                cols.at(k) = sorted_entries.at(k).col;
+                values.at(k) = sorted_entries.at(k).value;
+              }
+          if(count > 0)
+            {
+              El::mpi::Broadcast(constraints.data(), count, 0, comm);
+              El::mpi::Broadcast(rows.data(), count, 0, comm);
+              El::mpi::Broadcast(cols.data(), count, 0, comm);
+              El::mpi::Broadcast(values.data(), count, 0, comm);
+            }
+
+          // F_0 is densified; F_1..m stay triplets.
+          auto &F_0_block = sdp_block_F_0.blocks.at(local_block_index);
+          El::Zero(F_0_block);
+          auto &per_block = sparse_F.entries.at(local_block_index);
+          for(size_t k = 0; k < count; ++k)
+            {
+              const auto constraint = static_cast<size_t>(constraints.at(k));
+              if(constraint == 0)
+                {
+                  if(F_0_block.IsLocal(rows.at(k), cols.at(k)))
+                    F_0_block.SetLocal(F_0_block.LocalRow(rows.at(k)),
+                                       F_0_block.LocalCol(cols.at(k)),
+                                       values.at(k));
+                }
+              else
+                {
+                  per_block.at(constraint - 1)
+                    .push_back({rows.at(k), cols.at(k), values.at(k)});
+                }
             }
         }
     }
@@ -96,7 +157,7 @@ namespace Sdpb::Sdpa
 
   size_t SDP::primal_dimension() const
   {
-    return sdp_blocks_F.size();
+    return sparse_F.primal_dimension;
   }
 
   void SDP::validate(const Block_Info &block_info) const noexcept(false)
@@ -105,8 +166,8 @@ namespace Sdpb::Sdpa
 
     // Check primal_objective_c
     {
-      ASSERT_EQUAL(primal_objective_c.Height(), this->sdp_blocks_F.size(),
-                   error_prefix,
+      ASSERT_EQUAL(static_cast<size_t>(primal_objective_c.Height()),
+                   sparse_F.primal_dimension, error_prefix,
                    "c_1..c_m and F_1..Fm should have the same length");
       ASSERT_EQUAL(primal_objective_c.Width(), 1, error_prefix,
                    "c should be a vector");
@@ -132,15 +193,16 @@ namespace Sdpb::Sdpa
           ASSERT_EQUAL(block.Width(), dim, error_prefix_index);
         }
 
-        for(const auto &F : sdp_blocks_F)
-          {
-            const auto &block = F.blocks.at(local_block_index);
-            ASSERT(El::mpi::Congruent(block.DistComm(), comm),
-                   error_prefix_index,
-                   "wrong MPI communicator for sdp_blocks_F");
-            ASSERT_EQUAL(block.Height(), dim, error_prefix_index);
-            ASSERT_EQUAL(block.Width(), dim, error_prefix_index);
-          }
+        ASSERT_EQUAL(sparse_F.entries.at(local_block_index).size(),
+                     sparse_F.primal_dimension, error_prefix_index);
+        for(const auto &per_i : sparse_F.entries.at(local_block_index))
+          for(const auto &e : per_i)
+            {
+              ASSERT(e.row >= 0 && e.col >= 0 && e.row < El::Int(dim)
+                       && e.col < El::Int(dim),
+                     error_prefix_index, "F entry out of range: (", e.row,
+                     ",", e.col, "), dim=", dim);
+            }
       }
   }
 }

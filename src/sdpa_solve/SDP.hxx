@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Block_Info.hxx"
+#include "Sparse_F.hxx"
 #include "sdp_solve/Block_Matrix/Block_Diagonal_Matrix.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
@@ -16,8 +17,9 @@ namespace Sdpb::Sdpa
   // Matrices F_i have block diagonal structure
   struct SDP
   {
-    // matrices F_1, ... F_m
-    std::vector<Block_Diagonal_Matrix> sdp_blocks_F;
+    // matrices F_1, ... F_m, sparse (#184): triplets per local block, both symmetric
+    // halves, sorted in Elemental's column-major element order per constraint.
+    Sparse_F_Matrices sparse_F;
 
     Block_Diagonal_Matrix sdp_block_F_0;
 

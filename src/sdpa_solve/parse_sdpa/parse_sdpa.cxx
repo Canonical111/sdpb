@@ -298,18 +298,13 @@ namespace Sdpb::Sdpa
     result.c_objective = read_c(is, block_structure.m_dim);
     ASSERT_EQUAL(block_structure.m_dim, result.c_objective.size());
 
-    // sdp_blocks_F[i][j] is i-th block of matrix F_j
-    std::vector<std::optional<std::vector<El::Matrix<El::BigFloat>>>>
-      sdp_blocks_F(block_structure.num_solver_blocks);
-    for(size_t index = 0; index < sdp_blocks_F.size(); ++index)
+    // #184: keep what the file is -- a triplet list -- instead of materializing every F_i
+    // densely ((m+1) zero-filled dim^2 matrices per block). Both symmetric halves are emitted,
+    // matching what the dense reader wrote into its matrices.
+    for(size_t index = 0; index < block_structure.num_solver_blocks; ++index)
       {
-        if(!should_parse_block(index))
-          continue;
-        const size_t height = block_structure.solver_block_sizes.at(index);
-        const size_t width = height;
-        El::Matrix<El::BigFloat> zero(height, width);
-        El::Zero(zero);
-        sdp_blocks_F.at(index).emplace(block_structure.m_dim + 1, zero);
+        if(should_parse_block(index))
+          result.parsed_block_entries.try_emplace(index);
       }
 
     const auto accept_sdpa_entry = [&](SDPA_Matrix_Entry &&sdpa_entry) {
@@ -320,15 +315,12 @@ namespace Sdpb::Sdpa
       if(!should_parse_block(entry.sdp_block_index))
         return;
 
-      auto &matrices = sdp_blocks_F.at(entry.sdp_block_index).value();
-
-      ASSERT_EQUAL(matrices.size(), block_structure.m_dim + 1, DEBUG_STRING(i),
-                   DEBUG_STRING(j), DEBUG_STRING(sdpa_entry.matrix_index),
-                   DEBUG_STRING(sdpa_entry.block_index));
-      auto &matrix = matrices.at(entry.vector_index);
-      matrix(i, j) = entry.value;
+      auto &entries = result.parsed_block_entries.at(entry.sdp_block_index);
+      entries.push_back({entry.vector_index, static_cast<El::Int>(i),
+                         static_cast<El::Int>(j), entry.value});
       if(i != j && file_type == SDPA_File_Type::sparse)
-        matrix(j, i) = entry.value;
+        entries.push_back({entry.vector_index, static_cast<El::Int>(j),
+                           static_cast<El::Int>(i), entry.value});
     };
 
     switch(file_type)
@@ -350,12 +342,6 @@ namespace Sdpb::Sdpa
                       ", next line: ", line);
       }
 
-    for(size_t index = 0; index < sdp_blocks_F.size(); ++index)
-      {
-        if(!should_parse_block(index))
-          continue;
-        result.parsed_blocks.emplace(index, sdp_blocks_F.at(index).value());
-      }
     return result;
   }
 

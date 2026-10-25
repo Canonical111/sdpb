@@ -5,22 +5,27 @@
 namespace Sdpb::Sdpa
 {
   // result = \sum_p a[p] F_p
+  //
+  // #184 sparse path. The dense version copied each dense F block and scaled the copy --
+  // a full dense temporary per (constraint, block). Sparse scatter-add touches each stored
+  // nonzero once; per element, constraints still accumulate in ascending p, matching the
+  // dense loop's addition order.
   inline void
   constraint_matrix_weighted_sum(const SDP &sdp, const Primal_Dist_Vector &a,
                                  Block_Diagonal_Matrix &result)
   {
-    ASSERT_EQUAL(a.Height(), sdp.primal_dimension());
+    ASSERT_EQUAL(static_cast<size_t>(a.Height()), sdp.primal_dimension());
     ASSERT_EQUAL(a.Width(), 1);
     result.set_zero();
-    for(size_t i = 0; i < sdp.sdp_blocks_F.size(); i++)
+    const size_t m = sdp.primal_dimension();
+    for(size_t local_block = 0; local_block < sdp.sparse_F.entries.size();
+        ++local_block)
       {
-        const auto a_i = a.Get(i, 0);
-        const auto &F_i = sdp.sdp_blocks_F.at(i);
-        for(size_t block = 0; block < result.blocks.size(); ++block)
+        auto &result_block = result.blocks.at(local_block);
+        const auto &per_block = sdp.sparse_F.entries.at(local_block);
+        for(size_t i = 0; i < m; ++i)
           {
-            auto x_F_i_block = F_i.blocks.at(block);
-            El::Scale(a_i, x_F_i_block);
-            result.blocks.at(block) += x_F_i_block;
+            sparse_axpy_local(a.Get(i, 0), per_block.at(i), result_block);
           }
       }
   }

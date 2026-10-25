@@ -6,15 +6,29 @@
 namespace Sdpb::Sdpa
 {
   // dx[p] = -dual_residues[i] - Tr(F_i Z)
+  //
+  // #184 sparse path: disjoint local partial traces for all p, one AllReduce.
   void
   compute_schur_RHS(const SDP &sdp, const Primal_Dist_Vector &dual_residues,
                     const Block_Diagonal_Matrix &Z, Primal_Dist_Vector &dx)
   {
-    for(size_t p = 0; p < sdp.primal_dimension(); ++p)
+    const size_t m = sdp.primal_dimension();
+    std::vector<El::BigFloat> traces(m, El::BigFloat(0));
+    for(size_t local_block = 0; local_block < sdp.sparse_F.entries.size();
+        ++local_block)
+      {
+        const auto &Z_block = Z.blocks.at(local_block);
+        const auto &per_block = sdp.sparse_F.entries.at(local_block);
+        for(size_t p = 0; p < m; ++p)
+          {
+            sparse_dotu_local_update(per_block.at(p), Z_block, traces.at(p));
+          }
+      }
+    El::mpi::AllReduce(traces.data(), m, El::mpi::SUM, El::mpi::COMM_WORLD);
+    for(size_t p = 0; p < m; ++p)
       {
         const auto d_p = dual_residues.Get(p, 0);
-        const auto tr_F_p_Z = dotu(sdp.sdp_blocks_F.at(p), Z);
-        dx.Set(p, 0, -d_p - tr_F_p_Z);
+        dx.Set(p, 0, -d_p - traces.at(p));
       }
   }
 
