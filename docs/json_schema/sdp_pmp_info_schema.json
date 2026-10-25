@@ -40,6 +40,20 @@
           }
         }
       },
+      "domain": {
+        "type": "object",
+        "description": "Present only for a block positive on an interval [a, b]; absent for x >= 0.",
+        "properties": {
+          "interval": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 2,
+            "maxItems": 2
+          }
+        }
+      },
       "samplePoints": {
         "type": "array",
         "items": {

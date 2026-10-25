@@ -1,4 +1,5 @@
 #include "pmp/PMP_Info.hxx"
+#include "pmp_read/read_json/Json_Positivity_Domain_Parser.hxx"
 #include "sdpb_util/Archive_Reader.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 #include "sdpb_util/json/Abstract_Json_Object_Parser.hxx"
@@ -25,6 +26,7 @@ class Json_PVM_Info_Parser final : public Abstract_Json_Object_Parser<PVM_Info>
   Json_Vector_Parser<Json_BigFloat_Parser> sample_points_parser;
   Json_Vector_Parser<Json_BigFloat_Parser> sample_scalings_parser;
   Json_Vector_Parser<Json_BigFloat_Parser> reduced_sample_scalings_parser;
+  Json_Positivity_Domain_Parser domain_parser;
   Json_Skip_Element_Parser skip_element_parser{};
 
 public:
@@ -43,7 +45,8 @@ public:
         ELEMENT_PARSER_CTOR(reduced_prefactor),
         ELEMENT_PARSER_CTOR(sample_points),
         ELEMENT_PARSER_CTOR(sample_scalings),
-        ELEMENT_PARSER_CTOR(reduced_sample_scalings)
+        ELEMENT_PARSER_CTOR(reduced_sample_scalings),
+        ELEMENT_PARSER_CTOR(domain)
 #undef ELEMENT_PARSER_CTOR
   {}
 
@@ -72,6 +75,8 @@ protected:
       return sample_scalings_parser;
     if(key == "reducedSampleScalings")
       return reduced_sample_scalings_parser;
+    if(key == "domain")
+      return domain_parser;
 
     PRINT_WARNING("unknown pmp_info JSON key=\"", key, "\"");
     return skip_element_parser;
@@ -88,6 +93,7 @@ public:
     sample_points_parser.reset(skip);
     sample_scalings_parser.reset(skip);
     reduced_sample_scalings_parser.reset(skip);
+    domain_parser.reset(skip);
   }
   void clear_result() override { result = PVM_Info(); }
 };

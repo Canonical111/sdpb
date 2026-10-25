@@ -34,6 +34,18 @@ inline void write_pmp_info_json(std::ostream &output_stream,
       {
         writer.Uint64(block.dim);
       }
+      // Written only for an interval, so that output for x >= 0 is unchanged.
+      if(block.domain.is_interval())
+        {
+          writer.Key("domain");
+          writer.StartObject();
+          writer.Key("interval");
+          writer.StartArray();
+          writer.BigFloat(block.domain.a());
+          writer.BigFloat(block.domain.b());
+          writer.EndArray();
+          writer.EndObject();
+        }
       writer.Key("prefactor");
       {
         writer.StartObject();
@@ -143,6 +155,30 @@ inline void synchronize_pvm_info(PVM_Info &pvm_info, const int from)
           damped_rational.poles = to_Boost_Float_Vector(poles);
         }
     }
+  // domain
+  {
+    if(rank == from)
+      {
+        const bool is_interval = pvm_info.domain.is_interval();
+        El::mpi::Send<int>(is_interval, to, comm);
+        if(is_interval)
+          {
+            El::mpi::Send(pvm_info.domain.a(), to, comm);
+            El::mpi::Send(pvm_info.domain.b(), to, comm);
+          }
+      }
+    if(rank == to)
+      {
+        pvm_info.domain.interval.reset();
+        if(El::mpi::Recv<int>(from, comm) != 0)
+          {
+            const auto a = El::mpi::Recv<El::BigFloat>(from, comm);
+            const auto b = El::mpi::Recv<El::BigFloat>(from, comm);
+            pvm_info.domain.interval.emplace(a, b);
+          }
+      }
+  }
+
   for(auto vec_ptr : {&pvm_info.sample_points, &pvm_info.sample_scalings,
                       &pvm_info.reduced_sample_scalings})
     {

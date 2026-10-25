@@ -1,0 +1,4 @@
+{
+  "num_blocks": 1,
+  "command": "build/pmp2sdp --precision=768 --outputFormat json -i test/data/end-to-end_tests/1d-interval/input/pmp.json -o test/data/end-to-end_tests/1d-interval/output/sdp"
+}

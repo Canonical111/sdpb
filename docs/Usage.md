@@ -36,6 +36,11 @@ conversion.  `[INPUT]` is a single Mathematica, JSON, XML or NSV
 (Null Separated Value) file. `[OUTPUT]` is an output directory.
 You can also use `--maxNumPoles` to downsample the PMP (see Section 4.3 in https://arxiv.org/abs/2509.14307), and `--outputFormat` and `--zip` to specify output file format. Call `pmp2sdp --help` to see options description. 
 
+By default, each block must be positive semidefinite for x >= 0. In JSON input, a block with
+`"domain": {"interval": ["a", "b"]}` is imposed on a <= x <= b instead, with the Markov-Lukacs weights
+(1 and (x-a)(b-x) for even degree, x-a and b-x for odd degree); see the
+[manual](SDPB_Manual/SDPB-Manual.pdf), Section 3.2. `spectrum` does not support such blocks yet.
+
 The single file Mathematica and JSON formats are described in Section
 3.2 of the [manual](SDPB_Manual/SDPB-Manual.pdf). In addition, for JSON there
 is a [schema](json_schema/pmp_schema.json).

@@ -1,0 +1,36 @@
+{
+	"objective":[
+		"0",
+		"-1"
+	],
+	"normalization":[
+		"1",
+		"0"
+	],
+	"PositiveMatrixWithPrefactorArray":[
+		{
+			"domain":{
+				"interval":[
+					"1",
+					"2"
+				]
+			},
+			"polynomials":[
+				[
+					[
+						[
+							"1",
+							"0",
+							"0",
+							"1"
+						],
+						[
+							"0",
+							"1"
+						]
+					]
+				]
+			]
+		}
+	]
+}

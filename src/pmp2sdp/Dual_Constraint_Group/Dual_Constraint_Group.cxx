@@ -14,7 +14,8 @@ void write_block_json(std::ostream &output_stream,
 std::array<El::Matrix<El::BigFloat>, 2>
 sample_bilinear_basis(const std::array<Polynomial_Vector, 2> &bilinear_basis,
                       const std::vector<El::BigFloat> &sample_points,
-                      const std::vector<El::BigFloat> &sample_scalings);
+                      const std::vector<El::BigFloat> &sample_scalings,
+                      const Positivity_Domain &domain);
 
 // Construct a Dual_Constraint_Group from a Polynomial_Vector_Matrix by
 // sampling the matrix at the appropriate number of points, as
@@ -74,7 +75,10 @@ Dual_Constraint_Group::Dual_Constraint_Group(const size_t &Block_index,
   //
   //   Y_1: {q_0(x), ..., q_delta1(x)}
   //   Y_2: {\sqrt(x) q_0(x), ..., \sqrt(x) q_delta2(x)
+  //
+  // On an interval [a, b], the factors 1 and \sqrt(x) are replaced by
+  // the square roots of the weights in Positivity_Domain.hxx.
 
   bilinear_bases = sample_bilinear_basis(m.bilinear_basis, m.sample_points,
-                                         m.reduced_sample_scalings);
+                                         m.reduced_sample_scalings, m.domain);
 }

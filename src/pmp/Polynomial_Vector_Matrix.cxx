@@ -10,6 +10,10 @@ std::vector<Boost_Float>
 sample_points(const size_t &num_points, const Damped_Rational &prefactor);
 
 std::vector<Boost_Float>
+interval_sample_points(const size_t &num_points, const Boost_Float &a,
+                       const Boost_Float &b);
+
+std::vector<Boost_Float>
 sample_scalings(const std::vector<Boost_Float> &points,
                 const Damped_Rational &damped_rational);
 
@@ -59,12 +63,51 @@ namespace
     return exp_minus_x;
   }
 
+  // On an interval, the default prefactor is 1:
+  // the polynomials need no damping on a compact domain.
+  Damped_Rational interval_prefactor_or_default(
+    const std::optional<Damped_Rational> &prefactor_opt,
+    const Positivity_Domain &domain)
+  {
+    if(!prefactor_opt.has_value())
+      return {1, 1, {}};
+
+    // Positivity on [a,b] is imposed on the polynomials,
+    // so the prefactor must be positive on [a,b].
+    const auto &prefactor = prefactor_opt.value();
+    const Boost_Float a = to_Boost_Float(domain.a());
+    const Boost_Float b = to_Boost_Float(domain.b());
+    ASSERT(prefactor.constant > 0 && prefactor.base > 0,
+           "prefactor must be positive on the domain [a, b]",
+           DEBUG_STRING(prefactor));
+    size_t num_poles_above = 0;
+    for(const auto &pole : prefactor.poles)
+      {
+        ASSERT(pole < a || pole > b,
+               "prefactor has a pole inside the domain [a, b]",
+               DEBUG_STRING(pole), DEBUG_STRING(a), DEBUG_STRING(b));
+        if(pole > b)
+          ++num_poles_above;
+      }
+    ASSERT(num_poles_above % 2 == 0,
+           "prefactor must be positive on the domain [a, b]: an odd number "
+           "of poles above b makes it negative",
+           DEBUG_STRING(prefactor), DEBUG_STRING(a), DEBUG_STRING(b));
+    return prefactor;
+  }
+
   std::vector<El::BigFloat> sample_points_or_default(
     const std::optional<std::vector<El::BigFloat>> &sample_points_opt,
-    const Damped_Rational &prefactor, const size_t num_points)
+    const Damped_Rational &prefactor, const Positivity_Domain &domain,
+    const size_t num_points)
   {
     if(sample_points_opt.has_value())
       return sample_points_opt.value();
+
+    if(domain.is_interval())
+      return to_BigFloat_Vector(
+        interval_sample_points(num_points, to_Boost_Float(domain.a()),
+                               to_Boost_Float(domain.b())));
 
     return to_BigFloat_Vector(sample_points(num_points, prefactor));
   }
@@ -131,12 +174,17 @@ Polynomial_Vector_Matrix::Polynomial_Vector_Matrix(
   const std::optional<std::vector<El::BigFloat>> &sample_points_opt,
   const std::optional<std::vector<El::BigFloat>> &sample_scalings_opt,
   const std::optional<std::vector<El::BigFloat>> &reduced_sample_scalings_opt,
-  const std::optional<std::array<Polynomial_Vector, 2>> &bilinear_basis_opt)
-    : polynomials(polynomials)
+  const std::optional<std::array<Polynomial_Vector, 2>> &bilinear_basis_opt,
+  const std::optional<Positivity_Domain> &domain_opt)
+    : polynomials(polynomials), domain(domain_opt.value_or(Positivity_Domain{}))
 {
+  domain.validate();
+
   const int64_t max_degree = get_max_degree(polynomials);
 
-  prefactor = prefactor_or_default(prefactor_opt, max_degree);
+  prefactor = domain.is_interval()
+                ? interval_prefactor_or_default(prefactor_opt, domain)
+                : prefactor_or_default(prefactor_opt, max_degree);
 
   // Set and validate reduced_prefactor
   {
@@ -158,6 +206,17 @@ Polynomial_Vector_Matrix::Polynomial_Vector_Matrix(
           = {std::prev(poles.end(), max_num_poles), poles.end()};
       }
 
+    if(domain.is_interval()
+       && (reduced_prefactor_opt.has_value()
+           || reduced_prefactor.poles.size() != prefactor.poles.size()))
+      {
+        RUNTIME_ERROR("reducedPrefactor, or maxNumPoles below the number of "
+                      "prefactor poles, is not supported for an interval "
+                      "domain",
+                      DEBUG_STRING(prefactor.poles.size()),
+                      DEBUG_STRING(reduced_prefactor.poles.size()));
+      }
+
     if(reduced_prefactor.poles.size() > prefactor.poles.size())
       {
         PRINT_WARNING("reducedPrefactor has more poles than prefactor, the "
@@ -172,8 +231,8 @@ Polynomial_Vector_Matrix::Polynomial_Vector_Matrix(
   ASSERT(num_points > 0, DEBUG_STRING(num_points), DEBUG_STRING(max_degree),
          DEBUG_STRING(prefactor), DEBUG_STRING(reduced_prefactor));
 
-  sample_points = sample_points_or_default(sample_points_opt,
-                                           reduced_prefactor, num_points);
+  sample_points = sample_points_or_default(
+    sample_points_opt, reduced_prefactor, domain, num_points);
 
   sample_scalings = sample_scalings_or_default(sample_scalings_opt,
                                                this->sample_points, prefactor);
@@ -189,8 +248,11 @@ Polynomial_Vector_Matrix::Polynomial_Vector_Matrix(
     return sample_scalings;
   }();
 
-  bilinear_basis = bilinear_basis_or_default(bilinear_basis_opt, sample_points,
-                                             reduced_sample_scalings);
+  // On an interval, the default bases are built by pmp2sdp
+  // at the sample points (see has_default_interval_basis()).
+  if(!domain.is_interval() || bilinear_basis_opt.has_value())
+    bilinear_basis = bilinear_basis_or_default(
+      bilinear_basis_opt, sample_points, reduced_sample_scalings);
 
   validate(num_points);
 }
@@ -201,16 +263,32 @@ void Polynomial_Vector_Matrix::validate(const int64_t num_points) const
   ASSERT_EQUAL(sample_points.size(), num_points);
   ASSERT_EQUAL(reduced_sample_scalings.size(), sample_points.size());
 
-  const size_t delta1 = degree / 2;
-  ASSERT_EQUAL(bilinear_basis[0].size(), delta1 + 1, DEBUG_STRING(degree));
-  if(degree == 0)
+  if(domain.is_interval())
     {
-      ASSERT_EQUAL(bilinear_basis[1].size(), 0);
+      for(const auto &x : sample_points)
+        ASSERT(domain.contains(x),
+               "sample points must lie in the domain [a, b]", DEBUG_STRING(x),
+               DEBUG_STRING(domain.a()), DEBUG_STRING(domain.b()));
+    }
+
+  if(has_default_interval_basis())
+    {
+      ASSERT(bilinear_basis[1].empty());
     }
   else
     {
-      const size_t delta2 = (degree + 1) / 2 - 1;
-      ASSERT_EQUAL(bilinear_basis[1].size(), delta2 + 1, DEBUG_STRING(degree));
+      const size_t delta1 = degree / 2;
+      ASSERT_EQUAL(bilinear_basis[0].size(), delta1 + 1, DEBUG_STRING(degree));
+      if(degree == 0)
+        {
+          ASSERT_EQUAL(bilinear_basis[1].size(), 0);
+        }
+      else
+        {
+          const size_t delta2 = (degree + 1) / 2 - 1;
+          ASSERT_EQUAL(bilinear_basis[1].size(), delta2 + 1,
+                       DEBUG_STRING(degree));
+        }
     }
 
   ASSERT_EQUAL(polynomials.Height(), polynomials.Width());

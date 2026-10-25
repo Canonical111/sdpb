@@ -152,6 +152,7 @@ See details in \texttt{docs/Usage.md}.
 	@\textrm{\em{(optional)}}@ "prefactor" | "DampedRational": @\repl{damped-rational prefactor}@,
 	@\textrm{\em{(optional)}}@ "reducedPrefactor": @\repl{damped-rational prefactor}@,
 	@\textrm{\em{(optional)}}@ "maxNumPoles": @\repl{maximal number of poles in reducedPrefactor}@,
+	@\textrm{\em{(optional)}}@ "domain": {"interval": ["$a_j$", "$b_j$"]},
 	"polynomials": [
 		[@\repl{polynomial vector $Q^{n}_{j,11}(x)$}@, ... @\repl{polynomial vector $Q^{n}_{j,m_j1}(x)$}@],
 		...
@@ -216,6 +217,24 @@ Negative \texttt{maxNumPoles} values are ignored.
 
 
 If \texttt{"bilinearBasis"} is specified, it is used for both $q_m^{(j1)}(x)$ and $q_m^{(j2)}(x)$. This field is left for backward compatibility with SDPB 3.0.0 and earlier.
+
+\paragraph{Positivity on an interval.}
+By default, positivity is imposed for $x\geq 0$, as in \eqref{eq:PMPconstraintMathematica}.
+If \texttt{"domain": \{"interval": ["$a_j$", "$b_j$"]\}} is specified (with $a_j<b_j$), positivity of block $j$ is imposed for $a_j\leq x\leq b_j$ instead.
+\texttt{pmp2sdp} then uses the Markov--Luk\'acs representation of a polynomial matrix of degree $d_j$ positive semidefinite on $[a,b]$,
+\be
+M(x) = w_1(x)\, q^{(j1)}(x)^T Y_1\, q^{(j1)}(x) + w_2(x)\, q^{(j2)}(x)^T Y_2\, q^{(j2)}(x),\qquad Y_1,Y_2\succeq 0,
+\ee
+with weights $w_1=1$, $w_2=(x-a)(b-x)$ for even $d_j$, and $w_1=x-a$, $w_2=b-x$ for odd $d_j$, in place of $w_1=1$, $w_2=x$ on $x\geq 0$.
+The bilinear bases have the same sizes as on $x\geq 0$, so the SDP has the same block structure; no change of variable such as $x=t/(1+t)$ is needed.
+On an interval:
+\begin{itemize}
+	\item the default prefactor is $\chi(x)=1$; a specified prefactor must be positive on $[a,b]$ (no poles in $[a,b]$, and an even number of poles above $b$), and its base may be any positive number;
+	\item default sample points are the Chebyshev nodes $x_k=\frac{a+b}{2}-\frac{b-a}{2}\cos\frac{\pi(2k+1)}{2(d_j+1)}$, $k=0,\dots,d_j$; specified sample points must lie in $[a,b]$;
+	\item if no bilinear bases are specified, \texttt{pmp2sdp} samples bases orthonormal with respect to $\sum_k w_i(x_k)\, s_k \delta(x-x_k)dx$ directly at the sample points (built from Chebyshev polynomials of $(2x-a-b)/(b-a)$), without forming monomial coefficients;
+	\item \texttt{"reducedPrefactor"}, and \texttt{"maxNumPoles"} below the number of prefactor poles, are not supported.
+\end{itemize}
+The domain is recorded in \texttt{pmp\_info.json}. The \texttt{spectrum} program does not support interval domains yet.
 
 The \texttt{JSON} format is also described by the schema in \texttt{docs/json\_schema/pmp\_schema.json}.
 

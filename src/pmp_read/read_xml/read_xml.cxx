@@ -89,7 +89,8 @@ read_xml(const std::filesystem::path &input_file, const int64_t max_num_poles,
           index, Polynomial_Vector_Matrix(
                    std::move(poly_vectors), prefactor, reduced_prefactor,
                    max_num_poles, std::move(sample_points),
-                   std::move(sample_scalings), std::nullopt, bilinear_basis));
+                   std::move(sample_scalings), std::nullopt, bilinear_basis,
+                   std::nullopt));
       }
     ++result.num_matrices;
   };

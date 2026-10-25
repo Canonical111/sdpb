@@ -44,6 +44,6 @@ parse_matrix(const char *begin, const char *end, const int64_t max_num_poles,
 
   matrix = std::make_unique<Polynomial_Vector_Matrix>(
     Simple_Matrix(polynomials), prefactor, std::nullopt, max_num_poles,
-    std::nullopt, std::nullopt, std::nullopt, std::nullopt);
+    std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt);
   return std::next(close_bracket);
 }

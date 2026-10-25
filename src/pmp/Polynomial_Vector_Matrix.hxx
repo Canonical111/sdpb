@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Polynomial.hxx"
+#include "Positivity_Domain.hxx"
 #include "sdpb_util/Damped_Rational.hxx"
 #include "sdpb_util/Simple_Matrix.hxx"
 
@@ -30,6 +31,7 @@
 // A Polynomial_Vector_Matrix contains the data needed to construct this
 // Dual_Constraint_Group.
 // It also may contain Damped_Rational prefactor
+// and the domain of x (by default x >= 0, see Positivity_Domain.hxx).
 struct Polynomial_Vector_Matrix
 {
   // TODO: This is actually a symmetric matrix (dim x dim) of a vector
@@ -50,7 +52,13 @@ struct Polynomial_Vector_Matrix
 
   // bilinearBasis[m] = q_m(x) (0 <= m <= degree/2), where q_m is a
   // polynomial with degree deg(q_m) = m.
+  // For an interval domain without user-supplied bilinear bases, both are
+  // empty: pmp2sdp then samples bases orthonormal at the sample points
+  // directly, without monomial coefficients (see sample_bilinear_basis).
   std::array<Polynomial_Vector, 2> bilinear_basis;
+
+  // Where (1,y) . M(x) must be positive semidefinite: x >= 0 or [a, b].
+  Positivity_Domain domain;
 
   Polynomial_Vector_Matrix(
     const Simple_Matrix<Polynomial_Vector> &polynomials,
@@ -60,8 +68,15 @@ struct Polynomial_Vector_Matrix
     const std::optional<std::vector<El::BigFloat>> &sample_points_opt,
     const std::optional<std::vector<El::BigFloat>> &sample_scalings_opt,
     const std::optional<std::vector<El::BigFloat>> &reduced_sample_scalings_opt,
-    const std::optional<std::array<Polynomial_Vector, 2>>
-      &bilinear_basis_opt) noexcept(false);
+    const std::optional<std::array<Polynomial_Vector, 2>> &bilinear_basis_opt,
+    const std::optional<Positivity_Domain> &domain_opt) noexcept(false);
+
+  // True if bilinear_basis is empty and pmp2sdp builds orthonormal bases
+  // at the sample points (interval domain without user-supplied bases).
+  [[nodiscard]] bool has_default_interval_basis() const
+  {
+    return domain.is_interval() && bilinear_basis[0].empty();
+  }
 
   void validate(int64_t num_points) const;
 };

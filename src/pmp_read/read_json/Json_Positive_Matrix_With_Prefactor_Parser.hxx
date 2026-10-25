@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Json_Polynomial_Parser.hxx"
+#include "Json_Positivity_Domain_Parser.hxx"
 #include "pmp/Polynomial_Vector_Matrix.hxx"
 #include "sdpb_util/to_matrix.hxx"
 #include "sdpb_util/json/Json_Damped_Rational_Parser.hxx"
@@ -23,6 +24,7 @@ private:
   std::optional<std::vector<El::BigFloat>> sample_scalings;
   std::optional<std::vector<El::BigFloat>> reduced_sample_scalings;
   std::optional<std::array<Polynomial_Vector, 2>> bilinear_basis;
+  std::optional<Positivity_Domain> domain;
 
 public:
   Json_Positive_Matrix_With_Prefactor_Parser(
@@ -44,6 +46,7 @@ public:
         ELEMENT_PARSER_CTOR(sample_points),
         ELEMENT_PARSER_CTOR(sample_scalings),
         ELEMENT_PARSER_CTOR(reduced_sample_scalings),
+        ELEMENT_PARSER_CTOR(domain),
 
 #undef ELEMENT_PARSER_CTOR
 
@@ -86,6 +89,7 @@ private:
   Polynomial_Vector_Parser bilinear_basis_parser;
   Polynomial_Vector_Parser bilinear_basis_0_parser;
   Polynomial_Vector_Parser bilinear_basis_1_parser;
+  Json_Positivity_Domain_Parser domain_parser;
 
 protected:
   Abstract_Json_Reader_Handler &element_parser(const std::string &key) override
@@ -110,6 +114,8 @@ protected:
       return bilinear_basis_0_parser;
     if(key == "bilinearBasis_1")
       return bilinear_basis_1_parser;
+    if(key == "domain")
+      return domain_parser;
     RUNTIME_ERROR("unknown key=", key);
   }
 
@@ -133,7 +139,8 @@ public:
     // TODO add move ctor for Polynomial_Vector_Matrix?
     return Polynomial_Vector_Matrix(matrix, prefactor, reduced_prefactor,
                                     num_poles, sample_points, sample_scalings,
-                                    reduced_sample_scalings, bilinear_basis);
+                                    reduced_sample_scalings, bilinear_basis,
+                                    domain);
   }
   void clear_result() override
   {
@@ -146,6 +153,7 @@ public:
     sample_scalings.reset();
     reduced_sample_scalings.reset();
     bilinear_basis.reset();
+    domain.reset();
   }
   void reset_element_parsers(const bool skip) override
   {
@@ -161,5 +169,6 @@ public:
     bilinear_basis_parser.reset(skip);
     bilinear_basis_0_parser.reset(skip);
     bilinear_basis_1_parser.reset(skip);
+    domain_parser.reset(skip);
   }
 };

@@ -175,6 +175,13 @@ find_zeros(const El::Matrix<El::BigFloat> &c_minus_By_block,
   Scoped_Timer timer(timers, "find_zeros");
   ASSERT(threshold > 0, DEBUG_STRING(threshold));
 
+  // The search below assumes the domain x >= 0
+  // (it checks x = 0 and looks for positive minima).
+  if(pvm.domain.is_interval())
+    RUNTIME_ERROR("spectrum does not support an interval domain yet: block_",
+                  pvm.block_index, " has domain [", pvm.domain.a(), ", ",
+                  pvm.domain.b(), "]");
+
   // Special case: constant constraint, isolated zero
   // In this case c-B.y is a constant matrix.
   // If it has a small eigenvalue, then we should report that we found a zero.

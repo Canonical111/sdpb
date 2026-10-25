@@ -51,6 +51,19 @@
                     "maxNumPoles": {
                         "type": "integer"
                     },
+                    "domain": {
+                        "type": "object",
+                        "properties":
+                        {
+                            "interval": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "minItems": 2,
+                                "maxItems": 2
+                            }
+                        },
+                        "additionalProperties": false
+                    },
                     "DampedRational":
                     {
                         "type": "object",

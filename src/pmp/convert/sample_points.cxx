@@ -238,3 +238,31 @@ sample_points(const size_t &num_points, const Damped_Rational &prefactor)
 
   return points;
 }
+
+// Chebyshev nodes of the first kind on [a,b], in increasing order:
+//   x_k = (a+b)/2 - (b-a)/2 cos(pi (2k+1) / (2 num_points)).
+// They lie strictly inside [a,b], so both Markov-Lukacs weights
+// (see Positivity_Domain.hxx) are positive at every point.
+std::vector<Boost_Float>
+interval_sample_points(const size_t &num_points, const Boost_Float &a,
+                       const Boost_Float &b)
+{
+  ASSERT(num_points > 0);
+  ASSERT(a < b, DEBUG_STRING(a), DEBUG_STRING(b));
+  const auto pi = boost::math::constants::pi<Boost_Float>();
+  const Boost_Float center = (a + b) / 2;
+  const Boost_Float half_width = (b - a) / 2;
+
+  std::vector<Boost_Float> points(num_points);
+  for(size_t k = 0; k < num_points; ++k)
+    {
+      points.at(k)
+        = center
+          - half_width * cos(pi * (2 * k + 1) / (2 * num_points));
+    }
+
+  for(size_t k = 1; k < num_points; ++k)
+    ASSERT(points.at(k) > points.at(k - 1), DEBUG_STRING(k),
+           DEBUG_STRING(num_points));
+  return points;
+}

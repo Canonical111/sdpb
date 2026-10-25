@@ -17,6 +17,7 @@ struct PVM_Info
   std::vector<El::BigFloat> sample_points;
   std::vector<El::BigFloat> sample_scalings;
   std::vector<El::BigFloat> reduced_sample_scalings;
+  Positivity_Domain domain;
 
   PVM_Info() = default;
 
@@ -29,7 +30,8 @@ struct PVM_Info
         reduced_prefactor(pvm.reduced_prefactor),
         sample_points(pvm.sample_points),
         sample_scalings(pvm.sample_scalings),
-        reduced_sample_scalings(pvm.reduced_sample_scalings)
+        reduced_sample_scalings(pvm.reduced_sample_scalings),
+        domain(pvm.domain)
   {}
 
   void validate() const
