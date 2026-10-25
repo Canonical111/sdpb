@@ -18,6 +18,9 @@ namespace Sdpb::Sdpa
 
   private:
     Shared_Window_Array_View<double> G_window_view;
+    // lab (bfss #68): staging for LAB_RESTORE_CONTIGUOUS=1, serialized BigFloats
+    // indexed like the elements of one prime in the G residues window.
+    std::unique_ptr<Shared_Window_Array<El::byte>> restore_staging;
     std::map<std::tuple<size_t, El::VerticalOrHorizontal>,
              Vector_Block_Diagonal_Matrix_Residues_Window<double>>
       G_window_cache{};

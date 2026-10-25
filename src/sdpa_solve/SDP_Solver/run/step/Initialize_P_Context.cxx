@@ -5,7 +5,10 @@
 #include "sdpb_util/bigint_shared_memory/fmpz/residues.hxx"
 
 #include <cblas.h>
+#include <cstdlib>
+#include <memory>
 #include <optional>
+#include <string>
 
 namespace Sdpb::Sdpa
 {
@@ -347,6 +350,112 @@ namespace Sdpb::Sdpa
     El::Matrix<int32_t> &block_timings_ms)
   {
     Scoped_Timer timer(timers, "restore_from_residues");
+    // lab (bfss #68), LAB_RESTORE_CONTIGUOUS=1: restore in window order.
+    // Each rank owns a 2-D cyclic subset of every block, so restoring its own
+    // entries reads the 79 residues of each entry from 79 cache lines that
+    // other ranks also need (55262073: ~10 us per entry at 128 ranks per
+    // node, vs ~1.2 us on one core). Instead, the ranks of a group restore
+    // contiguous ranges of each block's residue matrix (all entries, owned
+    // or not) into a node-shared staging window of serialized BigFloats,
+    // and then each rank copies its own entries from there. Same arithmetic
+    // per entry, so the same values.
+    static const bool contiguous = [] {
+      const char *env = std::getenv("LAB_RESTORE_CONTIGUOUS");
+      return env != nullptr && std::string(env) == "1";
+    }();
+    if(contiguous)
+      {
+        const size_t value_size = El::BigFloat().SerializedSize();
+        const size_t num_elements = bdms_residues.prime_stride;
+        if(!restore_staging
+           || restore_staging->size() < num_elements * value_size)
+          {
+            restore_staging.reset();
+            restore_staging = std::make_unique<Shared_Window_Array<El::byte>>(
+              shared_memory_comm, num_elements * value_size);
+          }
+        El::byte *staging = restore_staging->data();
+        const double *base = bdms_residues.data(0);
+        {
+          Scoped_Timer restore_timer(timers, "contiguous");
+          std::vector<mp_limb_t> residues_buffer_temp;
+          Fmpz_BigInt bigint_temp;
+          El::BigFloat value;
+          for(size_t vec_index = 0; vec_index < bdms.size(); vec_index++)
+            {
+              auto &bdm = bdms.at(vec_index);
+              for(size_t block = 0; block < bdm.blocks.size(); block++)
+                {
+                  const auto &matrix = bdm.blocks.at(block);
+                  const auto &loc = cfg.local_block_locations().at(block);
+                  const auto first_residue_matrix = bdms_residues.get_matrix_view(
+                    0, loc.block_index_node, vec_index);
+                  const size_t height = first_residue_matrix.Height();
+                  const size_t width = first_residue_matrix.Width();
+                  ASSERT_EQUAL(height, matrix.Height());
+                  ASSERT_EQUAL(width, matrix.Width());
+                  const size_t group_size = matrix.DistComm().Size();
+                  const size_t group_rank = matrix.DistComm().Rank();
+                  const size_t n = height * width;
+                  const size_t k_begin = n * group_rank / group_size;
+                  const size_t k_end = n * (group_rank + 1) / group_size;
+                  Timer block_timer;
+                  for(size_t k = k_begin; k < k_end; ++k)
+                    {
+                      const double *first_residue
+                        = first_residue_matrix.LockedBuffer(k % height,
+                                                            k / height);
+                      residues_to_bigint(first_residue,
+                                         bdms_residues.prime_stride, comb,
+                                         residues_buffer_temp, bigint_temp);
+                      bigint_temp.to_BigFloat(value);
+                      value.Serialize(staging
+                                      + (first_residue - base) * value_size);
+                    }
+                  block_timings_ms(loc.block_index_global, 0)
+                    += block_timer.elapsed_milliseconds();
+                }
+            }
+        }
+        {
+          Scoped_Timer fence_timer(timers, "staging_fence");
+          restore_staging->Fence();
+        }
+        {
+          Scoped_Timer copy_timer(timers, "copy_own");
+          for(size_t vec_index = 0; vec_index < bdms.size(); vec_index++)
+            {
+              auto &bdm = bdms.at(vec_index);
+              for(size_t block = 0; block < bdm.blocks.size(); block++)
+                {
+                  auto &matrix = bdm.blocks.at(block);
+                  const auto &loc = cfg.local_block_locations().at(block);
+                  const auto first_residue_matrix = bdms_residues.get_matrix_view(
+                    0, loc.block_index_node, vec_index);
+                  Timer block_timer;
+                  for(int jLoc = 0; jLoc < matrix.LocalWidth(); ++jLoc)
+                    {
+                      const int j = matrix.GlobalCol(jLoc);
+                      for(int iLoc = 0; iLoc < matrix.LocalHeight(); ++iLoc)
+                        {
+                          const int i = matrix.GlobalRow(iLoc);
+                          const double *first_residue
+                            = first_residue_matrix.LockedBuffer(i, j);
+                          matrix.Matrix()(iLoc, jLoc).Deserialize(
+                            staging + (first_residue - base) * value_size);
+                        }
+                    }
+                  block_timings_ms(loc.block_index_global, 0)
+                    += block_timer.elapsed_milliseconds();
+                }
+            }
+        }
+        Scoped_Timer fence_timer(timers, "fence");
+        // Also orders this copy before the next restore overwrites staging.
+        restore_staging->Fence();
+        bdms_residues.Fence();
+        return;
+      }
     for(size_t vec_index = 0; vec_index < bdms.size(); vec_index++)
       {
         auto &bdm = bdms.at(vec_index);
