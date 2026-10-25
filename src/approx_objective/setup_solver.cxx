@@ -91,10 +91,9 @@ namespace
     // schur_complement_cholesky
     mem_required_size += schur_complement_size;
 
-    // Add either schur_complement from initialize_schur_complement_solver(),
-    // or SDP from quadratic_approximate_objectives()
-    // (they do not coexist, thus we choose maximum size instead of adding both)
-    mem_required_size += std::max(schur_complement_size, SDP_size);
+    // SDP from quadratic_approximate_objectives()
+    // (schur_complement is computed in place in schur_complement_cholesky)
+    mem_required_size += SDP_size;
 
     // schur_off_diagonal = L^{-1} B takes the same size as B
     // Allocated in initialize_schur_off_diagonal()

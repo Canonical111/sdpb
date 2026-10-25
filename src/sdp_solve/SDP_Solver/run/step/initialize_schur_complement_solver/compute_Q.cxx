@@ -6,9 +6,9 @@
 #include "sdpb_util/Timers/Timers.hxx"
 
 // schur_off_diagonal = L^{-1} B
+// On entry schur_complement_cholesky holds S; it is factorized in place.
 void initialize_schur_off_diagonal(
   const Environment &env, const SDP &sdp, const Block_Info &block_info,
-  const Block_Diagonal_Matrix &schur_complement,
   Block_Matrix &schur_off_diagonal,
   Block_Diagonal_Matrix &schur_complement_cholesky, Timers &timers,
   El::Matrix<int32_t> &block_timings_ms, const Verbosity verbosity)
@@ -23,9 +23,6 @@ void initialize_schur_off_diagonal(
       auto block_index_string = std::to_string(global_block_index);
       {
         Scoped_Timer cholesky_timer(timers, "cholesky_" + block_index_string);
-        schur_complement_cholesky.blocks[block]
-          = schur_complement.blocks[block];
-
         try
           {
             Cholesky(El::UpperOrLowerNS::LOWER,
@@ -133,7 +130,6 @@ void syrk_Q(const Environment &env, Block_Matrix &schur_off_diagonal,
 
 void compute_Q(const Environment &env, const SDP &sdp,
                const Block_Info &block_info,
-               const Block_Diagonal_Matrix &schur_complement,
                Block_Matrix &schur_off_diagonal,
                Block_Diagonal_Matrix &schur_complement_cholesky,
                BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,
@@ -143,9 +139,9 @@ void compute_Q(const Environment &env, const SDP &sdp,
 {
   Scoped_Timer timer(timers, "Q");
 
-  initialize_schur_off_diagonal(env, sdp, block_info, schur_complement,
-                                schur_off_diagonal, schur_complement_cholesky,
-                                timers, block_timings_ms, verbosity);
+  initialize_schur_off_diagonal(env, sdp, block_info, schur_off_diagonal,
+                                schur_complement_cholesky, timers,
+                                block_timings_ms, verbosity);
   syrk_Q(env, schur_off_diagonal, bigint_syrk_context, Q, timers,
          block_timings_ms, verbosity);
 }

@@ -121,13 +121,11 @@ namespace
     // A_X_inv and A_Y
     mem_required_size += 2 * A_X_inv_size;
 
-    // schur_complement_cholesky
+    // schur_complement_cholesky (S is computed and factorized in place)
     mem_required_size += schur_complement_size;
 
-    // Add either schur_complement from initialize_schur_complement_solver(),
-    // or XY,R,Z from compute_search_direction().
-    // (they do not coexist, thus we choose maximum size instead of adding both)
-    mem_required_size += std::max(schur_complement_size, 3 * X_size);
+    // XY,R,Z from compute_search_direction()
+    mem_required_size += 3 * X_size;
 
     // schur_off_diagonal = L^{-1} B
     mem_required_size += B_size;

@@ -31,12 +31,10 @@
 // - BilinearPairingsXInv, BilinearPairingsY (these are members of
 //   SDPSolver, but we include them as arguments to emphasize that
 //   they must be computed first)
-// Workspace (members of SDPSolver which are modified by this method
-// and not used later):
-// - SchurComplement
 // Outputs (members of SDPSolver which are modified by this method and
 // used later):
-// - SchurComplementCholesky
+// - SchurComplementCholesky (S is computed in place and factorized in place,
+//   so S is never stored separately)
 // - SchurOffDiagonal
 //
 
@@ -52,7 +50,6 @@ void compute_schur_complement(
 
 void compute_Q(const Environment &env, const SDP &sdp,
                const Block_Info &block_info,
-               const Block_Diagonal_Matrix &schur_complement,
                Block_Matrix &schur_off_diagonal,
                Block_Diagonal_Matrix &schur_complement_cholesky,
                BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,
@@ -78,17 +75,14 @@ void initialize_schur_complement_solver(
   // block for each 0 <= j < J.  SchurComplement.blocks[j] has dimension
   // (d_j+1)*m_j*(m_j+1)/2
   //
-  Block_Diagonal_Matrix schur_complement(
-    block_info.schur_block_sizes(), block_info.block_indices,
-    block_info.num_points.size(), group_grid);
-  if(verbosity >= Verbosity::trace)
-    {
-      print_allocation_message_per_node(env, "schur_complement",
-                                        get_allocated_bytes(schur_complement));
-    }
-  compute_schur_complement(block_info, A_X_inv, A_Y, schur_complement, timers);
+  // S is written directly into schur_complement_cholesky, which the caller
+  // allocates with the same block sizes and grid (S is fully overwritten),
+  // and compute_Q() factorizes it in place. This saves one copy of S
+  // (sum_j dim(S_j)^2 BigFloats) at the memory peak; results are unchanged.
+  compute_schur_complement(block_info, A_X_inv, A_Y, schur_complement_cholesky,
+                           timers);
 
-  compute_Q(env, sdp, block_info, schur_complement, schur_off_diagonal,
+  compute_Q(env, sdp, block_info, schur_off_diagonal,
             schur_complement_cholesky, bigint_syrk_context, Q, timers,
             block_timings_ms, verbosity);
 
