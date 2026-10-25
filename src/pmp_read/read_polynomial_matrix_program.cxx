@@ -154,6 +154,9 @@ Polynomial_Matrix_Program read_polynomial_matrix_program(
       if(!known_counts.at(i).has_value())
         files_to_parse.push_back(i);
     }
+  ASSERT(!files_to_parse.empty(),
+         "All input files have a known number of matrices; at least the "
+         "file with the objective must be read.");
 
   // Parse files
 

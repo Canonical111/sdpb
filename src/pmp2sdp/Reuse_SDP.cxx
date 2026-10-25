@@ -7,6 +7,7 @@
 #include <rapidjson/document.h>
 
 #include <fstream>
+#include <set>
 #include <sstream>
 
 namespace fs = std::filesystem;
@@ -200,9 +201,16 @@ void Reused_SDP::set_new_block_mapping(
   const std::vector<std::pair<fs::path, size_t>> &files)
 {
   new_to_old.clear();
+  std::set<fs::path> reused_paths;
   for(const auto &[path, count] : files)
     {
       const auto it = old_blocks_by_path.find(path);
+      if(it != old_blocks_by_path.end())
+        {
+          ASSERT(reused_paths.insert(path).second,
+                 "--reuseSdp: input file listed more than once: ", path);
+          ASSERT_EQUAL(it->second.size(), count, DEBUG_STRING(path));
+        }
       for(size_t j = 0; j < count; ++j)
         {
           if(it == old_blocks_by_path.end())
