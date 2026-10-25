@@ -237,6 +237,49 @@ namespace Sdpb::Sdpa
         for(size_t block = 0; block < block_info.num_blocks_local(); ++block)
           result.spill.append_chunk_block(block, p_begin,
                                           P_chunk.blocks.at(block));
+
+        if(std::getenv("SDPB_P_SPILL_DEBUG") != nullptr && p_begin == 0)
+          {
+            // Probe A: the normalized-and-shifted column 0 should have
+            // sum(v^2) / 2^(2 bits) ~= 1 (up to truncation).
+            El::BigFloat sum_sq(0);
+            for(auto &chunk_block : P_chunk.blocks)
+              for(El::Int iLoc = 0; iLoc < chunk_block.LocalHeight(); ++iLoc)
+                if(chunk_block.IsLocal(chunk_block.GlobalRow(iLoc), 0))
+                  {
+                    const auto &v = chunk_block.GetLocalCRef(
+                      iLoc, chunk_block.LocalCol(0));
+                    sum_sq += v * v;
+                  }
+            El::BigFloat scaled = sum_sq;
+            scaled >>= 2 * static_cast<int>(bits);
+            El::Output("SPILL_DEBUG A: col0 sum_sq >> 2bits = ", scaled);
+
+            // Probe B: round-trip the spill for the first block, cols [0, chunk).
+            for(size_t block = 0; block < block_info.num_blocks_local();
+                ++block)
+              {
+                const auto &chunk_block = P_chunk.blocks.at(block);
+                El::DistMatrix<El::BigFloat> rt(grid);
+                result.spill.read_band(
+                  block, El::Range<El::Int>(0, chunk_block.Height()),
+                  El::Range<El::Int>(0, static_cast<El::Int>(chunk_width)),
+                  rt);
+                El::BigFloat max_diff(0);
+                for(El::Int jLoc = 0; jLoc < rt.LocalWidth(); ++jLoc)
+                  for(El::Int iLoc = 0; iLoc < rt.LocalHeight(); ++iLoc)
+                    {
+                      const auto diff
+                        = rt.GetLocalCRef(iLoc, jLoc)
+                          - chunk_block.GetLocalCRef(iLoc, jLoc);
+                      if(El::Abs(diff) > max_diff)
+                        max_diff = El::Abs(diff);
+                    }
+                if(block < 3 || max_diff != El::BigFloat(0))
+                  El::Output("SPILL_DEBUG B: block ", block,
+                             " roundtrip max |new - old| = ", max_diff);
+              }
+          }
       }
 
     return result;
@@ -267,6 +310,7 @@ namespace Sdpb::Sdpa
           bands.clear();
           El::Int skip = skip_rows;
           El::Int budget = max_height;
+          const bool debug = std::getenv("SDPB_P_SPILL_DEBUG") != nullptr;
           for(size_t b = 0; b < spill.block_heights.size(); ++b)
             {
               const auto height = spill.block_heights.at(b);
@@ -285,6 +329,15 @@ namespace Sdpb::Sdpa
               auto &band = bands.emplace_back();
               spill.read_band(b, El::Range<El::Int>(row_begin, row_end),
                               col_range, band);
+            }
+          if(debug)
+            {
+              El::Int total = 0;
+              for(const auto &band : bands)
+                total += band.Height();
+              El::Output("SPILL_DEBUG C: band skip=", skip_rows,
+                         " max_h=", max_height, " cols=[", col_range.beg, ",",
+                         col_range.end, ") total_band_height=", total);
             }
         };
 
