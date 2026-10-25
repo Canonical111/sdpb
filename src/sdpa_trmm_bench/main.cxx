@@ -11,11 +11,12 @@
 // reach its file-local helpers) on one rank, with B in the role of G.
 //
 // run:  sdpa_trmm_bench run <schur.bin> <B.bin> --method el|elinv|sdpa
-//         [--precision P] [--n N] [--cols C] [--out-L f] [--out-X f]
+//         [--precision P] [--n N] [--cols C] [--guard G] [--out-L f] [--out-X f]
 //       el:    El::Cholesky + El::Trsm (SDPB master)
 //       elinv: El::Cholesky + El::TriangularInverse + El::Trmm (BigFloat)
 //       sdpa:  El::Cholesky + El::TriangularInverse + sdpa-solver's
-//              multimodular trmm
+//              multimodular trmm (--guard G: fixed point at precision + G
+//              bits instead of sdpa-solver's precision)
 // Matrix files: the SDPB_DUMP_BLOCK / mm_trsm_bench format of lab #145
 // (int64 height, width, precision; El::BigFloat::Serialize records,
 // column-major). Reader/writer copied from #145's mm_trsm_bench.
@@ -131,12 +132,13 @@ namespace
 
   // X := L^{-1} X by sdpa-solver's route. L_inv is the explicit inverse
   // (lower triangle significant), X is n x N. Both are overwritten.
+  // guard_bits = 0 is sdpa-solver's choice (bits = El::gmp::Precision()).
   void sdpa_trmm(El::DistMatrix<El::BigFloat> &L_inv,
                  El::DistMatrix<El::BigFloat> &X, const int num_ranks,
-                 std::map<std::string, double> &t)
+                 const int guard_bits, std::map<std::string, double> &t)
   {
     using namespace Sdpb::Sdpa;
-    const auto bits = El::gmp::Precision();
+    const int bits = El::gmp::Precision() + guard_bits;
     const size_t n = L_inv.Height(), N = X.Width();
     constexpr auto uplo = El::LOWER;
     constexpr auto diag = El::NON_UNIT;
@@ -228,6 +230,7 @@ namespace
     const int n = std::stoi(get("n", "-1"));
     const int cols = std::stoi(get("cols", "-1"));
     const int num_ranks = std::stoi(get("ranks", "1"));
+    const int guard_bits = std::stoi(get("guard", "0"));
 
     El::gmp::SetPrecision(precision == 0 ? file_precision(positional[0])
                                          : precision);
@@ -270,7 +273,7 @@ namespace
           El::Trmm(El::LEFT, El::LOWER, El::NORMAL, El::NON_UNIT,
                    El::BigFloat(1), L_inv, X);
         else
-          sdpa_trmm(L_inv, X, num_ranks, t);
+          sdpa_trmm(L_inv, X, num_ranks, guard_bits, t);
         t["trmm"] = seconds_since(start);
       }
     else
