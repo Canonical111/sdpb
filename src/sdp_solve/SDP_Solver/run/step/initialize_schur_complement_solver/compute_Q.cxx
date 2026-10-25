@@ -3,6 +3,7 @@
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/Matrix_Normalizer.hxx"
 #include "sdp_solve/SDP_Solver/run/multimodular/Multimodular_Block_Factor.hxx"
+#include "sdp_solve/SDP_Solver/run/multimodular/Multimodular_Node_Solve.hxx"
 #include "sdp_solve/memory_estimates.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
@@ -19,6 +20,22 @@ void initialize_schur_off_diagonal(
   schur_off_diagonal.blocks.reserve(schur_complement_cholesky.blocks.size());
 
   size_t num_blocks_local = schur_complement_cholesky.blocks.size();
+  const auto node_schedule = multimodular_trsm
+                               ? multimodular_node_schedule_from_env()
+                               : Multimodular_Node_Schedule::grid;
+  if(node_schedule != Multimodular_Node_Schedule::grid)
+    {
+      // Solves of all blocks of the node as node-wide jobs,
+      // see SDP_Solver/run/multimodular/Readme.md
+      for(size_t block = 0; block < num_blocks_local; ++block)
+        schur_off_diagonal.blocks.push_back(sdp.free_var_block_copy(block));
+      multimodular_node_cholesky_solve(
+        env.comm_shared_mem, block_info.block_indices,
+        schur_complement.blocks, schur_complement_cholesky.blocks,
+        schur_off_diagonal.blocks, node_schedule, Multimodular_Blas_Config(),
+        timers, block_timings_ms);
+      num_blocks_local = 0;
+    }
   for(size_t block = 0; block < num_blocks_local; ++block)
     {
       const auto global_block_index = block_info.block_indices.at(block);

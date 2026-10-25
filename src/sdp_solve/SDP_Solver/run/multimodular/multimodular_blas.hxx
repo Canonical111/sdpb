@@ -48,6 +48,12 @@ struct Multimodular_Blas_Config
   // Left-looking Trsm: memory for the stored residues of X; sets the
   // number of columns processed at once (L is converted once per chunk)
   size_t left_looking_bytes = size_t(384) << 20;
+  // If > 0: the left-looking / recursive choice is made as if B had this
+  // many columns. The arithmetic of each column does not depend on the other
+  // columns of B, only on this choice, so a solve split into column ranges
+  // (Multimodular_Node_Solve) then gives the same bits as a solve of B with
+  // decision_width columns.
+  int decision_width = 0;
 };
 
 struct Multimodular_Blas_Timings

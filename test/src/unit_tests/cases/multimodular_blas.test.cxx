@@ -1,6 +1,7 @@
 #include "catch2/catch_amalgamated.hpp"
 
 #include "sdp_solve/SDP_Solver/run/multimodular/Multimodular_Block_Factor.hxx"
+#include "sdp_solve/SDP_Solver/run/multimodular/Multimodular_Node_Solve.hxx"
 #include "sdp_solve/SDP_Solver/run/multimodular/multimodular_blas.hxx"
 #include "unit_tests/util/util.hxx"
 
@@ -500,5 +501,85 @@ TEST_CASE("Multimodular_Block_Factor")
     // Shared-memory and per-rank factors: the same arithmetic
     REQUIRE(bitwise_equal(L_results.at(0), L_results.at(1)));
     REQUIRE(bitwise_equal(X_results.at(0), X_results.at(1)));
+  }
+}
+
+TEST_CASE("Multimodular node schedule")
+{
+  // Blocks as in SDPB: block 0 on all ranks (one node in tests), and one
+  // block per rank on that rank alone. The node schedules split the solves
+  // into column ranges run by any rank of the node; the results must be
+  // bitwise those of the grid path (each column's arithmetic depends only on
+  // the left-looking / recursive choice, which they reproduce).
+  const auto schedule = GENERATE(Multimodular_Node_Schedule::static_lpt,
+                                 Multimodular_Node_Schedule::dynamic);
+  DYNAMIC_SECTION("schedule=" << int(schedule))
+  {
+    El::mpi::Comm node_comm;
+    MPI_Comm_split_type(El::mpi::COMM_WORLD.comm, MPI_COMM_TYPE_SHARED, 0,
+                        MPI_INFO_NULL, &node_comm.comm);
+    const int rank = El::mpi::Rank(), size = El::mpi::Size();
+    const int width = 200;
+    const El::Grid all_grid(El::mpi::COMM_WORLD), self_grid(El::mpi::COMM_SELF);
+    const std::vector<size_t> block_indices = {0, size_t(1 + rank)};
+    // n = 300: left-looking on the grid; 20 + 15 rank: substitution for
+    // small n, recursive above 32 rows
+    const std::vector<int> sizes = {300, 20 + 15 * rank};
+    std::vector<El::DistMatrix<El::BigFloat>> S, B;
+    for(size_t k = 0; k < 2; ++k)
+      {
+        const El::Grid &grid = k == 0 ? all_grid : self_grid;
+        const int n = sizes[k];
+        El::DistMatrix<El::BigFloat, El::CIRC, El::CIRC> S_root(n, n, grid),
+          B_root(n, width, grid);
+        if(S_root.CrossRank() == S_root.Root())
+          {
+            S_root.Matrix() = random_spd(n);
+            B_root.Matrix() = Test_Util::random_matrix(n, width);
+          }
+        S.emplace_back(S_root);
+        B.emplace_back(B_root);
+      }
+
+    Timers timers;
+    El::Matrix<int32_t> block_timings(1 + size, 1);
+    El::Zero(block_timings);
+    // Grid path
+    std::vector<El::DistMatrix<El::BigFloat>> L_grid, X_grid;
+    for(size_t k = 0; k < 2; ++k)
+      {
+        Multimodular_Block_Factor factor(S[k], Multimodular_Blas_Config());
+        L_grid.emplace_back(S[k].Grid());
+        X_grid.push_back(B[k]);
+        factor.cholesky(S[k], L_grid[k], timers);
+        factor.solve(X_grid[k], timers);
+      }
+    // Node path
+    std::vector<El::DistMatrix<El::BigFloat>> L_node, X_node;
+    for(size_t k = 0; k < 2; ++k)
+      {
+        L_node.emplace_back(S[k].Grid());
+        X_node.push_back(B[k]);
+      }
+    multimodular_node_cholesky_solve(node_comm, block_indices, S, L_node,
+                                     X_node, schedule,
+                                     Multimodular_Blas_Config(), timers,
+                                     block_timings);
+    for(size_t k = 0; k < 2; ++k)
+      {
+        CAPTURE(k);
+        CAPTURE(sizes[k]);
+        REQUIRE(bitwise_equal(L_node[k].LockedMatrix(),
+                              L_grid[k].LockedMatrix()));
+        REQUIRE(bitwise_equal(X_node[k].LockedMatrix(),
+                              X_grid[k].LockedMatrix()));
+      }
+    // and a solve
+    El::DistMatrix<El::BigFloat, El::STAR, El::STAR> L_star(L_node[0]),
+      X_star(X_node[0]), B_star(B[0]);
+    CHECK(log2_solve_backward_error(L_star.Matrix(), X_star.Matrix(),
+                                    B_star.Matrix())
+          < -El::gmp::Precision() + 8);
+    MPI_Comm_free(&node_comm.comm);
   }
 }
