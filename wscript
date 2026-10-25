@@ -95,6 +95,8 @@ def build(bld):
                          'src/sdp_solve/SDP_Solver/run/bigint_syrk/fmpz/Fmpz_Matrix.cxx',
                          'src/sdp_solve/SDP_Solver/run/bigint_syrk/fmpz/Fmpz_Comb.cxx',
                          'src/sdp_solve/SDP_Solver/run/bigint_syrk/Matrix_Normalizer.cxx',
+                         'src/sdp_solve/SDP_Solver/run/multimodular/multimodular_gemm.cxx',
+                         'src/sdp_solve/SDP_Solver/run/multimodular/blocked_cholesky_trsm.cxx',
                          'src/sdp_solve/SDP_Solver/run/step/compute_search_direction/compute_search_direction.cxx',
                          'src/sdp_solve/SDP_Solver/run/step/compute_search_direction/cholesky_solve.cxx',
                          'src/sdp_solve/SDP_Solver/run/step/compute_search_direction/compute_schur_RHS.cxx',
@@ -130,6 +132,15 @@ def build(bld):
                 defines=default_defines,
                 includes=default_includes,
                 use=use_packages + ['sdp_solve', 'mpsolve']
+                )
+
+    # Benchmark for the multimodular Cholesky/Trsm (lab #145)
+    bld.program(source=['src/mm_trsm_bench/main.cxx'],
+                target='mm_trsm_bench',
+                cxxflags=default_flags,
+                defines=default_defines,
+                includes=default_includes,
+                use=use_packages + ['sdp_solve']
                 )
 
     pmp2sdp_sources = ['src/pmp2sdp/Dual_Constraint_Group/Dual_Constraint_Group.cxx',

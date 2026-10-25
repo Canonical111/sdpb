@@ -16,6 +16,9 @@ struct Solver_Parameters
   size_t max_shared_memory_bytes;
   bool find_primal_feasible, find_dual_feasible, detect_primal_feasible_jump,
     detect_dual_feasible_jump;
+  // Experimental (lab #145): per-block Cholesky and L^{-1}B by multimodular
+  // BLAS, see sdp_solve/SDP_Solver/run/multimodular/Readme.md
+  bool multimodular_trsm = false;
   size_t precision;
 
   El::BigFloat duality_gap_threshold, primal_error_threshold,

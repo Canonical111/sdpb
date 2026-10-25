@@ -181,6 +181,9 @@ namespace
   }
 }
 
+// Defined in initialize_schur_complement_solver/compute_Q.cxx
+void set_multimodular_trsm(bool enable);
+
 SDP_Solver_Terminate_Reason SDP_Solver::run(
   const Environment &env, const Solver_Parameters &parameters,
   const Verbosity &verbosity,
@@ -194,6 +197,7 @@ SDP_Solver_Terminate_Reason SDP_Solver::run(
     SDP_Solver_Terminate_Reason::MaxIterationsExceeded);
   Scoped_Timer solver_timer(timers, "run");
   Scoped_Timer initialize_timer(timers, "initialize");
+  set_multimodular_trsm(parameters.multimodular_trsm);
   if(verbosity >= Verbosity::regular && El::mpi::Rank() == 0)
     {
       El::Output(boost::posix_time::second_clock::local_time(),
