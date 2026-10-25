@@ -216,3 +216,127 @@ TEST_CASE("blas_residues")
     }
   }
 }
+
+// Exact dyadic and boundary integers c, converted at the working precision P
+// as in multimodular GEMM: the BLAS CRT must be within its bound
+//   |v - c| < 2 num_primes 2^21 2^(24 t0) + 2^-P |c|
+// (blas_residues.hxx). It is not always bitwise equal to the exact CRT:
+// c = 2^K is the standard counterexample (the error borrows across the kept
+// limbs), and c = 1 lies within the CRT error of zero.
+TEST_CASE("blas_residues: exact dyadic CRT cases")
+{
+  if(El::mpi::Rank() != 0)
+    return;
+  // Precision of the mpf results; the Context is that of the multimodular
+  // Cholesky/Trsm at this precision (bits = P + 64), independent of
+  // El::gmp::Precision()
+  const long P = GENERATE(long(768), long(1024));
+  const long bits = P + 64;
+  const slong k = 1;
+  DYNAMIC_SECTION("P=" << P)
+  {
+    const auto &context = Blas_Residues::get_context(bits, bits, k);
+    const size_t num_primes = context.num_primes;
+    CAPTURE(num_primes);
+    CAPTURE(context.t0);
+    REQUIRE(context.t0 > 0);
+
+    // c = s 2^K + d, for 2^K at the top of the product range, at a limb
+    // boundary, in the middle and just above the CRT error; and small c
+    const long K_max = 2 * bits - 2;
+    std::vector<long> exponents{K_max, 2 * bits - 64 - 1, 2 * bits - 128,
+                                bits,
+                                Blas_Residues::chunk_bits * context.t0 + 64};
+    std::vector<fmpz> c;
+    auto add = [&c](const fmpz_t x) {
+      c.emplace_back();
+      fmpz_init_set(&c.back(), x);
+    };
+    fmpz_t x;
+    fmpz_init(x);
+    for(const long K : exponents)
+      for(const int sign : {1, -1})
+        for(const int d : {0, 1, -1})
+          {
+            fmpz_one(x);
+            fmpz_mul_2exp(x, x, K);
+            if(sign < 0)
+              fmpz_neg(x, x);
+            if(d > 0)
+              fmpz_add_ui(x, x, d);
+            else if(d < 0)
+              fmpz_sub_ui(x, x, -d);
+            add(x);
+          }
+    for(const long small : {0L, 1L, -1L, 3L})
+      {
+        fmpz_set_si(x, small);
+        add(x);
+      }
+    fmpz_clear(x);
+    const size_t n = c.size();
+
+    std::vector<int32_t> y(n * num_primes), y_flint(n * num_primes);
+    std::vector<double> quotients(n, 0.0);
+    for(size_t p = 0; p < num_primes; ++p)
+      {
+        const auto prime = context.comb.primes[p];
+        for(size_t e = 0; e < n; ++e)
+          {
+            const ulong r = fmpz_fdiv_ui(&c[e], prime);
+            y_flint[e + n * p] = r;
+            const double r_u = double((r * ulong(context.u[p])) % prime);
+            y[e + n * p] = int32_t(r_u);
+            quotients[e] += r_u * context.inverse_primes[p];
+          }
+      }
+
+    Blas_Residues::Crt_Workspace work(context);
+    Blas_Residues::blas_crt_high_chunks(context, y.data(), n, n, work);
+    mpf_t blas_value, flint_value, exact, diff, bound, absolute_bound;
+    mpf_init2(blas_value, P);
+    mpf_init2(flint_value, P);
+    const mp_bitcnt_t exact_precision = 2 * bits + 128;
+    for(auto *v : {&exact, &diff, &bound, &absolute_bound})
+      mpf_init2(*v, exact_precision);
+    // 2 num_primes 2^21 2^(24 t0)
+    mpf_set_ui(absolute_bound, 2 * num_primes);
+    mpf_mul_2exp(absolute_bound, absolute_bound,
+                 21 + Blas_Residues::chunk_bits * context.t0);
+    for(size_t e = 0; e < n; ++e)
+      {
+        CAPTURE(e);
+        CAPTURE(fmpz_bits(&c[e]));
+        mpf_set_ui(blas_value, 0);
+        mpf_set_ui(flint_value, 0);
+        Blas_Residues::blas_crt_to_mpf(context, work.S.data() + e, n,
+                                       quotients[e], 0, work, blas_value);
+        Blas_Residues::flint_crt_to_mpf(context, y_flint.data() + e, n, 0,
+                                        work, flint_value);
+        mpz_t z;
+        mpz_init(z);
+        fmpz_get_mpz(z, &c[e]);
+        mpf_set_z(exact, z);
+        mpz_clear(z);
+
+        // 2^-P |c|
+        mpf_abs(bound, exact);
+        mpf_div_2exp(bound, bound, P);
+        // FLINT: c truncated to P bits
+        mpf_sub(diff, flint_value, exact);
+        mpf_abs(diff, diff);
+        REQUIRE(mpf_cmp(diff, bound) <= 0);
+        // BLAS: within the CRT bound
+        mpf_add(bound, bound, absolute_bound);
+        mpf_sub(diff, blas_value, exact);
+        mpf_abs(diff, diff);
+        CAPTURE(mpf_get_d(diff));
+        REQUIRE(mpf_cmp(diff, bound) < 0);
+      }
+    for(auto *v :
+        {&blas_value, &flint_value, &exact, &diff, &bound, &absolute_bound})
+      mpf_clear(*v);
+    for(auto &v : c)
+      fmpz_clear(&v);
+  }
+}
