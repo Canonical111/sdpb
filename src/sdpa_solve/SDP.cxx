@@ -26,6 +26,21 @@ namespace Sdpb::Sdpa
 
     const auto &comm = block_info.mpi_comm.value;
 
+    // lab (bfss #61): with LAB_SDPA_INDEXED_READER=1 (plain .dat-s only),
+    // all ranks first index the file's block runs, so that each group root
+    // reads only its own blocks' lines instead of the whole file.
+    const bool indexed = use_sdpa_indexed_reader(sdp_path);
+    SDPA_Sparse_Index sparse_index;
+    if(indexed)
+      {
+        Scoped_Timer index_timer(timers, "index");
+        sparse_index = build_sdpa_sparse_index(sdp_path, El::mpi::COMM_WORLD);
+        if(El::mpi::Rank() == 0)
+          El::Output("Indexed SDPA reader: ", sparse_index.runs.size(),
+                     " block runs, entries at bytes ",
+                     sparse_index.data_begin, "..", sparse_index.file_size);
+      }
+
     // For each MPI group, rank=0 parses objective_c and the blocks for F_0..F_m that belong to this group.
     // Other ranks do not parse anything.
     auto parse_result = [&] {
@@ -38,6 +53,9 @@ namespace Sdpb::Sdpa
             return block_indices_to_parse.find(index)
                    != block_indices_to_parse.end();
           };
+          if(indexed)
+            return read_sdpa_indexed(sdp_path, sparse_index,
+                                     should_parse_block);
           return read_sdpa(sdp_path, should_parse_block);
         }
       return SDPA_File_Parse_Result();
