@@ -3,7 +3,9 @@
 // Residues and CRT computed with BLAS, for fixed-point integers taken
 // directly from BigFloat (mpf) values, without intermediate fmpz.
 // They complement FLINT's per-element routines (fmpz_mul_blas_util.hxx,
-// fmpz_multi_CRT_ui) and give the same results:
+// fmpz_multi_CRT_ui). The residues are the same as FLINT's. The CRT is
+// exact only for small products (t0 = 0 below); otherwise its result has
+// the bounded error stated below:
 //
 // Residues. An integer x = trunc(|v| 2^shift) sign(v), |x| < 2^bits, is
 //   split into 24-bit chunks c_t, and
@@ -24,11 +26,22 @@
 //   with 24 t0 <= min(bits_A, bits_B) - 117. For a product of fixed-point
 //   integers |a| < 2^bits_A, |b| < 2^bits_B this is at least 2^89 below the
 //   error of truncating the factors to integers (up to 2^bits_B per term).
-//   t0 is a multiple of 8, so 24 t0 is a multiple of the limb size: the
-//   conversion to mpf (blas_crt_to_mpf) then keeps the same limbs as the
-//   conversion of the exact c (flint_crt_to_mpf), and the two agree bit
-//   for bit unless the error reaches the lowest kept limb (|c| within
-//   ~2^(24 t0 + 28 + mpf precision) of 0).
+//   Conversion to an mpf of precision P (blas_crt_to_mpf) truncates
+//   c' 2^(24 t0) once, so the result v satisfies
+//     |v - c| < 2 num_primes 2^21 2^(24 t0) + 2^-P |c|.
+//   This bound is the contract (unit test blas_residues). The result is
+//   not bitwise equal to the conversion of the exact c (flint_crt_to_mpf)
+//   in general. t0 is a multiple of 8, so that 24 t0 is a multiple of the
+//   limb size and both conversions truncate at the same bit; they usually
+//   agree, but differ where c lies within the CRT error of a truncation
+//   boundary:
+//   - the error borrows across the kept limbs when c has a long run of zero
+//     bits there; e.g. for c = 2^K, v is one unit of the last kept limb
+//     below FLINT's (at P = 768: 2^-894 relative for K = 1662, and in
+//     multimodular_gemm_sub, 1 - 1*1 gives 2^-830 instead of 0);
+//   - |c| is so small (< ~2^(24 t0 + 28 + P)) that the error reaches the
+//     kept limbs.
+//   Both are within the bound above, i.e. below the working precision.
 //   The multiplication by u_p is folded into the residues of one factor
 //   (multiply_by_u in compute_blas_residues).
 //
@@ -178,8 +191,10 @@ namespace Blas_Residues
   blas_crt_high_chunks(const Context &context, const int32_t *residues,
                        size_t residue_stride, size_t n, Crt_Workspace &work);
 
-  // BLAS CRT, step 2, for one integer: value := c 2^shift (truncated to the
-  // precision of value), with S_t = S[t * stride] from blas_crt_high_chunks
+  // BLAS CRT, step 2, for one integer: value := c' 2^(24 t0) 2^shift,
+  // truncated to the precision P of value, i.e. c 2^shift within
+  // (2 num_primes 2^21 2^(24 t0) + 2^-P |c|) 2^shift (see above),
+  // with S_t = S[t * stride] from blas_crt_high_chunks
   // and quotient = sum_p y_p / p. Returns false (value untouched) if the
   // result is zero.
   bool blas_crt_to_mpf(const Context &context, const double *S, size_t stride,

@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <random>
+#include <utility>
 #include <vector>
 
 // Tests for the multimodular BLAS routines:
@@ -103,6 +104,61 @@ namespace
     return true;
   }
 
+  // Number of entries (i >= j if lower) that differ in any bit
+  size_t
+  num_bitwise_different(const El::Matrix<El::BigFloat> &A,
+                        const El::Matrix<El::BigFloat> &B,
+                        const bool lower = false)
+  {
+    REQUIRE(A.Height() == B.Height());
+    REQUIRE(A.Width() == B.Width());
+    size_t result = 0;
+    for(int j = 0; j < A.Width(); ++j)
+      for(int i = lower ? j : 0; i < A.Height(); ++i)
+        if(mpf_cmp(A.CRef(i, j).gmp_float.get_mpf_t(),
+                   B.CRef(i, j).gmp_float.get_mpf_t())
+           != 0)
+          ++result;
+    return result;
+  }
+
+  // Error of C = C0 - A op(B) relative to its term scale:
+  // max_ij |C_ij - D_ij| / T_ij as log2, with
+  // T_ij = |C0_ij| + k max_l |A_il| max_l |op(B)_lj|
+  double
+  log2_gemm_scaled_diff(const El::Matrix<El::BigFloat> &C,
+                        const El::Matrix<El::BigFloat> &D,
+                        const El::Matrix<El::BigFloat> &C0,
+                        const El::Matrix<El::BigFloat> &A,
+                        const El::Orientation orientation,
+                        const El::Matrix<El::BigFloat> &B)
+  {
+    const int m = A.Height(), k = A.Width(), n = C.Width();
+    auto op_B = [&](int l, int j) -> const El::BigFloat & {
+      return orientation == El::NORMAL ? B.CRef(l, j) : B.CRef(j, l);
+    };
+    std::vector<El::BigFloat> max_A(m, El::BigFloat(0)),
+      max_B(n, El::BigFloat(0));
+    for(int i = 0; i < m; ++i)
+      for(int l = 0; l < k; ++l)
+        max_A[i] = std::max(max_A[i], El::Abs(A.CRef(i, l)));
+    for(int j = 0; j < n; ++j)
+      for(int l = 0; l < k; ++l)
+        max_B[j] = std::max(max_B[j], El::Abs(op_B(l, j)));
+    double result = -INFINITY;
+    for(int j = 0; j < n; ++j)
+      for(int i = 0; i < m; ++i)
+        {
+          const El::BigFloat diff = El::Abs(C.CRef(i, j) - D.CRef(i, j));
+          if(diff == El::BigFloat(0))
+            continue;
+          const El::BigFloat scale
+            = El::Abs(C0.CRef(i, j)) + El::BigFloat(k) * max_A[i] * max_B[j];
+          result = std::max(result, log2_abs(diff) - log2_abs(scale));
+        }
+    return result;
+  }
+
   // Backward error of a Cholesky factor: max |S - L L^T| / max |S|, log2
   double log2_cholesky_backward_error(const El::Matrix<El::BigFloat> &S,
                                       const El::Matrix<El::BigFloat> &L_full)
@@ -172,14 +228,22 @@ TEST_CASE("multimodular_gemm_sub")
     // plus the rounding of C_ij
     CHECK(log2_rel_diff(C, C_ref) < -precision + std::log2(k) + 4);
 
-    SECTION("FLINT CRT gives the same bits")
+    SECTION("FLINT CRT")
     {
+      // Both CRTs see the same integers; the BLAS CRT is within its bound
+      // of the exact one (blas_residues.hxx), so the results differ by at
+      // most the two conversions, 2^-precision of the term scale each.
       auto C_flint = C0;
       auto flint_config = config;
       flint_config.flint_crt = true;
       multimodular_gemm_sub(C_flint, A, orientation, B, false, flint_config,
                             timings);
-      REQUIRE(bitwise_equal(C, C_flint));
+      CHECK(log2_gemm_scaled_diff(C, C_flint, C0, A, orientation, B)
+            < -precision + 2);
+      // With limb-aligned t0 they differ only near truncation boundaries,
+      // which random entries essentially never hit (before the alignment,
+      // most entries differed in the last limb at 768 bits)
+      CHECK(num_bitwise_different(C, C_flint) <= size_t(m) * n / 100);
     }
     SECTION("lower_only leaves the strictly upper part")
     {
@@ -193,6 +257,119 @@ TEST_CASE("multimodular_gemm_sub")
                             expected.gmp_float.get_mpf_t())
                     == 0);
           }
+    }
+  }
+}
+
+// Exact dyadic inputs: no fixed-point truncation, so the only errors are the
+// CRT's (blas_residues.hxx) and the roundings of the conversion and of
+// C -= c. The result is within ~2^(1-precision) of the term scale of the
+// exact answer, but not always equal to the exact answer when it is
+// representable: 1 - 1*1 gives 2^-830 at 768 bits and 2^-1086 at 1024 bits,
+// with FLINT's exact CRT 0.
+TEST_CASE("multimodular_gemm_sub: exact dyadic inputs")
+{
+  if(El::mpi::Rank() != 0)
+    return;
+  const int precision = El::gmp::Precision();
+  Multimodular_Blas_Config config;
+  config.column_chunk = 64;
+  Multimodular_Blas_Timings timings;
+
+  // C -= A op(B) with the exact answer `expected`, for the BLAS and FLINT
+  // CRTs
+  auto check = [&](const El::Matrix<El::BigFloat> &C0,
+                   const El::Matrix<El::BigFloat> &A,
+                   const El::Orientation orientation,
+                   const El::Matrix<El::BigFloat> &B,
+                   const El::Matrix<El::BigFloat> &expected) {
+    for(const bool flint_crt : {false, true})
+      {
+        CAPTURE(flint_crt);
+        auto C = C0;
+        auto c = config;
+        c.flint_crt = flint_crt;
+        multimodular_gemm_sub(C, A, orientation, B, false, c, timings);
+        const double error
+          = log2_gemm_scaled_diff(C, expected, C0, A, orientation, B);
+        CAPTURE(error);
+        CHECK(error < -precision + 2);
+      }
+  };
+  auto scalar = [](const El::BigFloat &x) {
+    El::Matrix<El::BigFloat> result(1, 1);
+    result.Set(0, 0, x);
+    return result;
+  };
+  auto power_of_2 = [](const long e) {
+    El::BigFloat x(1);
+    if(e >= 0)
+      mpf_mul_2exp(x.gmp_float.get_mpf_t(), x.gmp_float.get_mpf_t(), e);
+    else
+      mpf_div_2exp(x.gmp_float.get_mpf_t(), x.gmp_float.get_mpf_t(), -e);
+    return x;
+  };
+
+  SECTION("1 - 1*1 = 0, 0 - 1*1 = -1")
+  {
+    const auto one = scalar(El::BigFloat(1));
+    check(one, one, El::NORMAL, one, scalar(El::BigFloat(0)));
+    check(scalar(El::BigFloat(0)), one, El::NORMAL, one,
+          scalar(El::BigFloat(-1)));
+  }
+  SECTION("2^(a+b) - 2^a 2^b = 0")
+  {
+    for(const auto &[a, b] : {std::pair<long, long>(37, -5),
+                              std::pair<long, long>(-200, 3),
+                              std::pair<long, long>(64, 64)})
+      {
+        CAPTURE(a);
+        CAPTURE(b);
+        check(scalar(power_of_2(a + b)), scalar(power_of_2(a)), El::NORMAL,
+              scalar(power_of_2(b)), scalar(El::BigFloat(0)));
+        check(scalar(power_of_2(a + b + 1)), scalar(power_of_2(a)),
+              El::NORMAL, scalar(power_of_2(b)), scalar(power_of_2(a + b)));
+      }
+  }
+  SECTION("dyadic matrices: C0 = A op(B), A op(B) + 1, 0")
+  {
+    // Entries u 2^e, u odd < 2^20, |e| <= 40: A op(B) is exact in BigFloat,
+    // and every entry is exact in fixed point (spread < 64 guard bits)
+    std::mt19937_64 rng(3);
+    auto dyadic_matrix = [&rng, &power_of_2](const int height,
+                                             const int width) {
+      El::Matrix<El::BigFloat> result(height, width);
+      for(int j = 0; j < width; ++j)
+        for(int i = 0; i < height; ++i)
+          {
+            const long u = long(rng() % (1 << 20)) | 1;
+            const long e = long(rng() % 81) - 40;
+            El::BigFloat x = power_of_2(e) * El::BigFloat(double(u));
+            result.Set(i, j, (rng() & 1) ? x : -x);
+          }
+      return result;
+    };
+    const auto [m, k, n]
+      = GENERATE(std::make_tuple(3, 5, 4), std::make_tuple(40, 70, 150));
+    const auto orientation = GENERATE(El::NORMAL, El::TRANSPOSE);
+    DYNAMIC_SECTION("m=" << m << " k=" << k << " n=" << n << " transpose="
+                         << (orientation == El::TRANSPOSE))
+    {
+      const auto A = dyadic_matrix(m, k);
+      const auto B = orientation == El::NORMAL ? dyadic_matrix(k, n)
+                                               : dyadic_matrix(n, k);
+      El::Matrix<El::BigFloat> AB(m, n);
+      El::Gemm(El::NORMAL, orientation, El::BigFloat(1), A, B,
+               El::BigFloat(0), AB);
+      El::Matrix<El::BigFloat> zero(m, n), ones(m, n), minus_AB(AB);
+      El::Zero(zero);
+      El::Fill(ones, El::BigFloat(1));
+      El::Scale(El::BigFloat(-1), minus_AB);
+      auto AB_plus_1 = AB;
+      El::Axpy(El::BigFloat(1), ones, AB_plus_1);
+      check(AB, A, orientation, B, zero);
+      check(AB_plus_1, A, orientation, B, ones);
+      check(zero, A, orientation, B, minus_AB);
     }
   }
 }
@@ -252,7 +429,10 @@ TEST_CASE("multimodular Cholesky and Trsm vs El")
         flint_config.flint_crt = true;
         El::Matrix<El::BigFloat> X_flint(B);
         multimodular_trsm_left_lower(L, X_flint, flint_config, timings);
-        REQUIRE(bitwise_equal(X, X_flint));
+        // Same algorithm, CRT within its bound: as close as to El's X, and
+        // bitwise equal except at rare truncation boundaries (see the GEMM)
+        CHECK(log2_rel_diff(X, X_flint) < -precision + 10);
+        CHECK(num_bitwise_different(X, X_flint) <= size_t(n) * width / 100);
       }
     }
   }

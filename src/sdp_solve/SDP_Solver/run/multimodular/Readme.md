@@ -30,9 +30,15 @@ diagonal blocks (at most 32 x 32) need divisions and square roots, and those sta
    are one dgemm with the table 2^(24t) mod p. They are stored as int32 and converted to double per prime.
 3. **One `cblas_dgemm` per prime.**
 4. **CRT, also by BLAS** (`blas_residues.hxx`): one dgemm of the residues with the 24-bit chunks of M/p, then the
-   chunks are added up with carries. Chunks below 2^(24 t0) are not formed; the error this leaves is ~2^89 below
-   the fixed-point truncation of step 1. t0 is a multiple of 8 (whole limbs), so the results agree bit for bit
-   with FLINT's exact `fmpz_multi_CRT_ui` (`Multimodular_Blas_Config::flint_crt`, used by the unit tests).
+   chunks are added up with carries. Chunks below 2^(24 t0) are not formed. The integer error this leaves is
+   below num_primes 2^21 2^(24 t0), ~2^89 below the fixed-point truncation of step 1; after the conversion to a
+   BigFloat of precision P, |v - c| < 2 num_primes 2^21 2^(24 t0) + 2^-P |c| (the contract, in
+   `blas_residues.hxx`). The result is therefore **not** always bitwise equal to that of FLINT's exact
+   `fmpz_multi_CRT_ui` (`Multimodular_Blas_Config::flint_crt`, used by the unit tests). t0 is a multiple of 8
+   (whole limbs), so both conversions truncate at the same bit and agree for almost all entries; they differ
+   where c lies within the CRT error of a truncation boundary. Exact dyadic inputs do this: c = 2^K has a long
+   run of zero bits, the error borrows across the kept limbs, and 1 - 1*1 gives 2^-830 at 768 bits (2^-1086 at
+   1024 bits) instead of 0. Such differences are below the working precision of the terms.
    On the same data and in the same loop, the restore step (CRT, conversion to BigFloat, update of C) takes 2.3 s
    instead of 6.1 s with FLINT's CRT (975 x 975 Cholesky + Trsm with 1834 columns, 1024 bits, one core).
 5. C_ij -= c_ij 2^(e_i + e_j − 2 bits).
@@ -86,17 +92,22 @@ The defaults are in `Multimodular_Blas_Config` (`multimodular_blas.hxx`); there 
 
 `test/src/unit_tests/cases/multimodular_blas.test.cxx`:
 - BLAS residues equal FLINT's (`fmpz_multi_mod_uint32_stride`); the BLAS CRT is exact for t0 = 0 and within its
-  error bound otherwise, against FLINT's exact CRT;
-- GEMM, Cholesky and both Trsm variants against El at the working precision (backward errors), and BLAS CRT vs
-  FLINT CRT bit for bit;
+  error bound otherwise, against FLINT's exact CRT; at the working precision (768 and 1024 bits), exact dyadic and
+  boundary integers (±2^K, ±2^K ± 1, 0, ±1, 3) are within the bound after conversion
+  (`blas_residues.test.cxx`);
+- GEMM, Cholesky and both Trsm variants against El at the working precision (backward errors); BLAS CRT vs FLINT
+  CRT within the bound, and bitwise equal in at least 99% of the entries (this catches a misaligned t0);
+- GEMM with exact dyadic inputs (1 - 1*1, 2^(a+b) - 2^a 2^b, dyadic matrices with exact cancellation): within
+  2^(2 - precision) of the term scale of the exact answer, with both CRTs;
 - `Multimodular_Block_Factor` on distributed blocks (one rank, all ranks; shared window and per-rank copies)
   against `El::Cholesky` + `El::Trsm`.
 
 ## Measurements
 
-nmax=10 stress-tensor SDP, 1024 bits (dsd-lab-playground/bootstrap-speed `calc/sdpb_mm_trsm`,
+nmax=10 stress-tensor development SDP, 1024 bits (dsd-lab-playground/bootstrap-speed `calc/sdpb_mm_trsm`,
 `calc/sdpb_mm_vs_sdpa_trmm`, `calc/sdpb_mm_pr`):
 - Kernel, block 975 x 1834, one core: Cholesky + Trsm 35 s vs El's 362 s. Backward errors at El's level (2^-1021)
   against a 2048-bit MPFR reference, also at late iterations with κ(S) ~ 2^330.
 - One node, 128 ranks (`srun`, `--maxSharedMemory=16G`), same node: 54.0 s/iteration vs El's 107.5 s, iterations
-  equal to El's in every printed column.
+  equal to El's in every printed column (not bitwise: final objectives differ from El's by ~1e-241 relative). The
+  node's sampled peak memory is ~19% above El's, for a short transient; steady memory is El's.
