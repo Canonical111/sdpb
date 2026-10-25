@@ -238,6 +238,7 @@ namespace Sdpb::Sdpa
           result.spill.append_chunk_block(block, p_begin,
                                           P_chunk.blocks.at(block));
 
+      }
 
     return result;
   }
