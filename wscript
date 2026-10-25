@@ -144,6 +144,15 @@ def build(bld):
                 use=use_packages + ['sdp_solve', 'sdpa_solve', 'mpsolve']
                 )
 
+    # lab #175: sdpa-solver's multimodular trmm applied to an SDPB Schur block
+    bld.program(source=['src/sdpa_trmm_bench/main.cxx'],
+                target='sdpa_trmm_bench',
+                cxxflags=default_flags,
+                defines=default_defines,
+                includes=default_includes,
+                use=use_packages + ['sdp_solve', 'sdpa_solve']
+                )
+
     pmp2sdp_sources = ['src/pmp2sdp/Dual_Constraint_Group/Dual_Constraint_Group.cxx',
                        'src/pmp2sdp/Dual_Constraint_Group/sample_bilinear_basis.cxx',
                        'src/pmp2sdp/Output_SDP/Output_SDP.cxx',
