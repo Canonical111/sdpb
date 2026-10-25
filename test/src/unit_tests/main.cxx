@@ -3,6 +3,7 @@
 #include <catch2/catch_amalgamated.hpp>
 #include <El.hpp>
 #include <iostream>
+#include <cstdlib>
 #include <sstream>
 #include "test_util/diff.hxx"
 
@@ -13,7 +14,8 @@
 int main(int argc, char *argv[])
 {
   Environment env(argc, argv);
-  Environment::set_precision(768);
+  const char *verify_precision = std::getenv("VERIFY_PRECISION");
+  Environment::set_precision(verify_precision ? std::stol(verify_precision) : 768);
   Test_Util::REQUIRE_Equal::diff_precision = El::gmp::Precision();
 
   int rank = El::mpi::Rank();
