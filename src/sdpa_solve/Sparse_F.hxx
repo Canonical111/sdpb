@@ -74,6 +74,13 @@ namespace Sdpb::Sdpa
   }
 
   // result += a * F_i for one block, locally-owned elements only.
+  //
+  // NB: the product is written F * a, not a * F. GMP mpf results depend on the
+  // destination operand's limb state (mpf_mul truncates by the FIRST operand's
+  // storage, and El::BigFloat's operator* copies its left argument as the
+  // destination), so only F.value * a reproduces the dense path's
+  // El::Scale(a, F_copy) bit for bit. El::Dotu's A(i,j)*B(i,j) pattern is
+  // matched the same way in sparse_dotu_local_update above.
   inline void sparse_axpy_local(const El::BigFloat &a,
                                 const std::vector<Sparse_F_Entry> &entries,
                                 El::DistMatrix<El::BigFloat> &result)
@@ -82,7 +89,7 @@ namespace Sdpb::Sdpa
       {
         if(result.IsLocal(e.row, e.col))
           result.UpdateLocal(result.LocalRow(e.row), result.LocalCol(e.col),
-                             a * e.value);
+                             e.value * a);
       }
   }
 
