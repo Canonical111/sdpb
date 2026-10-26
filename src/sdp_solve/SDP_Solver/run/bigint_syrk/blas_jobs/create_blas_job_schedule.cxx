@@ -236,3 +236,46 @@ create_blas_job_schedule(const Blas_Job::Kind kind,
     kind, uplo, num_ranks, num_primes, output_matrix_height,
     output_matrix_width, best_split_factor);
 }
+
+// As create_blas_job_schedule(), with the cost of each job from job_cost
+// for both the LPT scheduling and the choice of the split factor
+Blas_Job_Schedule create_weighted_blas_job_schedule(
+  const Blas_Job::Kind kind, const El::UpperOrLowerNS::UpperOrLower uplo,
+  const size_t num_ranks, const size_t num_primes,
+  const El::Int output_matrix_height, const El::Int output_matrix_width,
+  const Verbosity verbosity,
+  const std::function<Blas_Job::Cost(const Blas_Job &)> &job_cost)
+{
+  const auto min_split_factor
+    = minimal_split_factor(kind, num_ranks, num_primes % num_ranks,
+                           output_matrix_height, output_matrix_width);
+  const auto weighted_jobs = [&](const size_t split_factor) {
+    std::vector<Blas_Job> jobs;
+    for(const auto &job : create_blas_jobs_split_remaining_primes(
+          kind, uplo, num_ranks, num_primes, output_matrix_height,
+          output_matrix_width, split_factor))
+      jobs.push_back(Blas_Job::with_cost(job, job_cost(job)));
+    return jobs;
+  };
+  size_t best_split_factor = min_split_factor;
+  Blas_Job::Cost min_cost
+    = {std::numeric_limits<size_t>::max(), std::numeric_limits<size_t>::max()};
+  for(auto split_factor = min_split_factor;
+      split_factor < min_split_factor + 5; ++split_factor)
+    {
+      if(split_factor > (size_t)output_matrix_height)
+        break;
+      const auto cost
+        = Blas_Job_Schedule(num_ranks, weighted_jobs(split_factor))
+            .max_rank_cost();
+      if(cost < min_cost)
+        {
+          min_cost = cost;
+          best_split_factor = split_factor;
+        }
+    }
+  if(verbosity >= Verbosity::trace && El::mpi::Rank() == 0)
+    El::Output("BLAS job schedule with job costs: split_factor=",
+               best_split_factor, ", heaviest rank cost ", min_cost);
+  return Blas_Job_Schedule(num_ranks, weighted_jobs(best_split_factor));
+}

@@ -69,3 +69,8 @@ Blas_Job::Blas_Job(Kind kind, size_t prime_index, const El::Range<El::Int> &I,
   if(kind == syrk && I.beg == J.beg)
     ASSERT_EQUAL(I.end, J.end, DEBUG_STRING(I.beg));
 }
+
+Blas_Job Blas_Job::with_cost(const Blas_Job &job, const Cost &cost)
+{
+  return Blas_Job(job.kind, job.prime_index, job.I, job.J, cost);
+}

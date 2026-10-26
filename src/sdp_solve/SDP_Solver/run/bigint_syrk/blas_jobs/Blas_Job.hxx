@@ -35,6 +35,8 @@ struct Blas_Job
   static Blas_Job
   create_gemm_job(size_t prime_index, const El::Range<El::Int> &I,
                   const El::Range<El::Int> &J);
+  // The same job with another cost estimate
+  static Blas_Job with_cost(const Blas_Job &job, const Cost &cost);
 
 private:
   Blas_Job(Kind kind, size_t prime_index, const El::Range<El::Int> &I,

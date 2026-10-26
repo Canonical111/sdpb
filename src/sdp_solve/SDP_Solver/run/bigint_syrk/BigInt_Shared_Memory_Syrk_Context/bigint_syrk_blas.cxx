@@ -380,8 +380,16 @@ void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas_shmem_submatrix(
   // syrk for diagonal blocks of Q (Q_II = P_I^T P_I),
   // gemm for off-diagonal (Q_IJ = P_I^T P_J)
   const auto kind = output_I == output_J ? Blas_Job::syrk : Blas_Job::gemm;
+  // --compressLinvB: balance the work on the column runs (job costs);
+  // SDPB_COMPRESS_SYRK_SCHEDULE=0 keeps the dense schedule
+  const char *weighted_env = std::getenv("SDPB_COMPRESS_SYRK_SCHEDULE");
+  const bool weighted
+    = node_column_runs != nullptr
+      && !(weighted_env != nullptr && std::string(weighted_env) == "0");
   const auto blas_job_schedule
-    = get_blas_job_schedule(kind, uplo, output_height, output_width);
+    = weighted ? get_weighted_blas_job_schedule(kind, uplo, output_I, output_J,
+                                                *node_column_runs)
+               : get_blas_job_schedule(kind, uplo, output_height, output_width);
 
   // Clear input and output windows
   clear_residues(*blas_job_schedule);
