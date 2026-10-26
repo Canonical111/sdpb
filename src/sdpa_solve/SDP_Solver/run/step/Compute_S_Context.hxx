@@ -5,11 +5,17 @@
 #include "sdpa_solve/SDP_Solver/run/step/Initialize_P_Context.hxx"
 #include "Solver_Run_Config.hxx"
 
+#include <optional>
+
 namespace Sdpb::Sdpa
 {
+  // #184: SDPB_STREAM_P=1 forms S band by band without P (compute_S_streaming.cxx);
+  // the trmm windows of the default path are then never allocated.
+  bool stream_S_enabled();
+
   struct Compute_S_Context
   {
-    Initialize_P_Context initialize_P_context;
+    std::optional<Initialize_P_Context> initialize_P_context;
     BigInt_Shared_Memory_Syrk_Context syrk_S_context;
     // TODO
     // Compute_S_Context(const Initialize_P_Config &initialize_p_config,
@@ -22,7 +28,12 @@ namespace Sdpb::Sdpa
            const Verbosity verbosity)
     {
       // TODO: reuse shared buffers for trmm and syrk?
-      return {Initialize_P_Context(cfg.initialize_P_config),
+      if(stream_S_enabled())
+        return {std::nullopt, BigInt_Shared_Memory_Syrk_Context(
+                                cfg.syrk_S_config, block_info.node_group_index(),
+                                block_info.block_indices, verbosity)};
+      return {std::optional<Initialize_P_Context>(std::in_place,
+                                                  cfg.initialize_P_config),
               BigInt_Shared_Memory_Syrk_Context(
                 cfg.syrk_S_config, block_info.node_group_index(),
                 block_info.block_indices, verbosity)};

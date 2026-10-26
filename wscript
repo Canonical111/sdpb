@@ -114,6 +114,7 @@ def build(bld):
                           'src/sdpa_solve/SDP_Solver/run/compute_dual_residues_and_error.cxx',
                           'src/sdpa_solve/SDP_Solver/run/step/compute_S.cxx',
                           'src/sdpa_solve/SDP_Solver/run/step/P_Spill.cxx',
+                          'src/sdpa_solve/SDP_Solver/run/step/compute_S_streaming.cxx',
                           'src/sdpa_solve/SDP_Solver/run/step/Solver_Run_Config.cxx',
                           'src/sdpa_solve/SDP_Solver/run/step/compute_search_direction.cxx',
                           'src/sdpa_solve/SDP_Solver/run/step/Initialize_P_Config.cxx',

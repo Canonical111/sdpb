@@ -11,6 +11,13 @@
 
 namespace Sdpb::Sdpa
 {
+  void compute_S_streaming(const SDP &sdp, const Block_Info &block_info,
+                           const Block_Diagonal_Matrix &X_cholesky,
+                           const Block_Diagonal_Matrix &Y_cholesky,
+                           BigInt_Shared_Memory_Syrk_Context &syrk_context,
+                           El::DistMatrix<El::BigFloat> &S, Timers &timers,
+                           El::Matrix<int32_t> &block_timings_ms);
+
   // The normalized-and-shifted P, packed (#184), plus its column norms:
   // everything the syrk step needs, at a fraction of full BigFloat P.
   struct Spilled_P
@@ -253,9 +260,16 @@ namespace Sdpb::Sdpa
             El::Matrix<int32_t> &block_timings_ms, const Verbosity verbosity)
   {
     Scoped_Timer timer(timers, "S");
+    if(!compute_S_context.initialize_P_context.has_value())
+      {
+        compute_S_streaming(sdp, block_info, X_cholesky, Y_cholesky,
+                            compute_S_context.syrk_S_context, S, timers,
+                            block_timings_ms);
+        return;
+      }
     Spilled_P P
       = initialize_P(env, sdp, block_info, grid, X_cholesky, Y_cholesky,
-                     compute_S_context.initialize_P_context, timers,
+                     *compute_S_context.initialize_P_context, timers,
                      block_timings_ms, verbosity);
 
     // Band provider: one matrix per local block, zero-height outside the band,

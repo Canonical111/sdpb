@@ -309,7 +309,8 @@ void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas_shmem_submatrix(
 void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas_from_bands(
   const El::UpperOrLower uplo, const Band_Provider &band_provider,
   El::DistMatrix<El::BigFloat> &bigint_output, Timers &timers,
-  El::Matrix<int32_t> &block_timings_ms)
+  El::Matrix<int32_t> &block_timings_ms,
+  const std::optional<size_t> input_iterations)
 {
   Scoped_Timer timer(timers, "bigint_syrk_blas");
 
@@ -328,9 +329,9 @@ void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas_from_bands(
           Scoped_Timer ij_timer(timers, El::BuildString("Q_", i, "_", j));
           const auto &J = output_ranges.at(j);
           auto bigint_output_submatrix = bigint_output(I, J);
-          bigint_syrk_blas_shmem_submatrix_from_bands(uplo, band_provider, I,
-                                                      J, timers,
-                                                      block_timings_ms);
+          bigint_syrk_blas_shmem_submatrix_from_bands(
+            uplo, band_provider, I, J, timers, block_timings_ms,
+            input_iterations.value_or(input_window_split_factor));
           std::optional<El::UpperOrLower> uplo_opt;
           if(I.beg == J.beg)
             uplo_opt = uplo;
@@ -343,7 +344,8 @@ void BigInt_Shared_Memory_Syrk_Context::
   bigint_syrk_blas_shmem_submatrix_from_bands(
     const El::UpperOrLower uplo, const Band_Provider &band_provider,
     const El::Range<El::Int> &output_I, const El::Range<El::Int> &output_J,
-    Timers &timers, El::Matrix<int32_t> &block_timings_ms)
+    Timers &timers, El::Matrix<int32_t> &block_timings_ms,
+    const size_t input_iterations)
 {
   Scoped_Timer timer(timers, "shmem");
 
@@ -370,7 +372,7 @@ void BigInt_Shared_Memory_Syrk_Context::
 
   clear_residues(blas_job_schedule);
 
-  for(size_t iter = 0; iter < input_window_split_factor; ++iter)
+  for(size_t iter = 0; iter < input_iterations; ++iter)
     {
       Scoped_Timer iter_timer(timers, "split_P_" + std::to_string(iter));
 

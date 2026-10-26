@@ -64,7 +64,15 @@ public:
                                    const Band_Provider &band_provider,
                                    El::DistMatrix<El::BigFloat> &bigint_output,
                                    Timers &timers,
-                                   El::Matrix<int32_t> &block_timings_ms);
+                                   El::Matrix<int32_t> &block_timings_ms,
+                                   std::optional<size_t> input_iterations
+                                   = std::nullopt);
+
+  // Rows per band that one input-window fill holds for this rank's MPI group.
+  [[nodiscard]] El::Int input_band_height() const
+  {
+    return input_group_height_per_prime();
+  }
 
 private:
   El::mpi::Comm shared_memory_comm;
@@ -118,7 +126,8 @@ private:
   void bigint_syrk_blas_shmem_submatrix_from_bands(
     El::UpperOrLower uplo, const Band_Provider &band_provider,
     const El::Range<El::Int> &output_I, const El::Range<El::Int> &output_J,
-    Timers &timers, El::Matrix<int32_t> &block_timings_ms);
+    Timers &timers, El::Matrix<int32_t> &block_timings_ms,
+    size_t input_iterations);
 
   void
   restore_and_reduce(std::optional<El::UpperOrLower> uplo,
