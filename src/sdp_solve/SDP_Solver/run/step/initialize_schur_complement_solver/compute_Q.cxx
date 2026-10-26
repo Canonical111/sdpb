@@ -179,7 +179,7 @@ void syrk_Q_streaming(
     El::Int height = 0;
     for(size_t block = 0; block < num_blocks; ++block)
       {
-        const El::Int block_height = B.blocks.at(block).Height();
+        const El::Int block_height = sdp.free_var_block_height(block);
         for(El::Int row = 0; row < block_height;)
           {
             if(height == band_height)
@@ -224,7 +224,7 @@ void syrk_Q_streaming(
   };
   double total_cost = 0;
   for(size_t block = 0; block < num_blocks; ++block)
-    total_cost += rows_cost(B.blocks.at(block).Height());
+    total_cost += rows_cost(sdp.free_var_block_height(block));
 
   // T_j: [MC,MR] like B_j (El), or this rank's columns of it (multimodular).
   std::vector<std::unique_ptr<El::DistMatrix<El::BigFloat>>> L_inv_B(
@@ -265,7 +265,7 @@ void syrk_Q_streaming(
                           / static_cast<double>(bands.size());
             for(size_t block = 0; block < num_blocks; ++block)
               {
-                const El::Int height = B.blocks.at(block).Height();
+                const El::Int height = sdp.free_var_block_height(block);
                 const El::Int pace_rows
                   = pace <= 0 ? 0
                     : pace >= rows_cost(height)
@@ -278,7 +278,6 @@ void syrk_Q_streaming(
                 if(r1 <= r0)
                   continue;
                 Timer trsm_timer;
-                const auto &B_block = B.blocks.at(block);
                 const auto &L = schur_complement_cholesky.blocks.at(block);
                 const El::IR rows(r0, r1);
                 const El::IR above(0, r0);
@@ -287,10 +286,11 @@ void syrk_Q_streaming(
                     auto &T = L_inv_B_columns.at(block);
                     if(!T)
                       {
+                        El::DistMatrix<El::BigFloat> B_scratch; // --sparseB
                         T = std::make_unique<
                           El::DistMatrix<El::BigFloat, El::STAR, El::VR>>(
-                          B_block.Grid());
-                        *T = B_block;
+                          B.blocks.at(block).Grid());
+                        *T = sdp.free_var_block(block, B_scratch);
                       }
                     const auto &factor = multimodular_factors.at(block);
                     const El::Matrix<El::BigFloat> &L_local
@@ -311,13 +311,13 @@ void syrk_Q_streaming(
                       += trsm_timer.elapsed_milliseconds();
                     continue;
                   }
+                // T_j starts as B_j: rows below rows_done are B's until solved.
                 auto &T = L_inv_B.at(block);
                 if(!T)
                   T = std::make_unique<El::DistMatrix<El::BigFloat>>(
-                    B_block.Height(), N, B_block.Grid());
+                    sdp.free_var_block_copy(block));
                 El::DistMatrix<El::BigFloat> panel;
                 El::View(panel, *T, rows, El::ALL);
-                El::Copy(El::LockedView(B_block, rows, El::ALL), panel);
                 if(r0 > 0)
                   El::Gemm(El::NORMAL, El::NORMAL, El::BigFloat(-1),
                            El::LockedView(L, rows, above),

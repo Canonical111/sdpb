@@ -22,7 +22,7 @@ void compute_schur_RHS(const Block_Info &block_info, const SDP &sdp,
 
 void solve_schur_complement_equation(
   const Block_Diagonal_Matrix &schur_complement_cholesky,
-  const Block_Matrix &schur_off_diagonal, const Block_Matrix &free_var_matrix,
+  const Block_Matrix &schur_off_diagonal, const SDP &sdp,
   const El::DistMatrix<El::BigFloat> &Q, Block_Vector &dx, Block_Vector &dy);
 
 void compute_search_direction(
@@ -59,7 +59,7 @@ void compute_search_direction(
 
   // Solve for dx, dy in-place
   solve_schur_complement_equation(schur_complement_cholesky,
-                                  schur_off_diagonal, sdp.free_var_matrix, Q,
+                                  schur_off_diagonal, sdp, Q,
                                   dx, dy);
 
   // dX = PrimalResidues + \sum_p A_p dx[p]

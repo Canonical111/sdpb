@@ -107,10 +107,12 @@ namespace
       size_t trsm_bytes = 0;
       if(block_info.mpi_comm.value.Rank() == 0)
         {
-          for(auto &m : sdp.free_var_matrix.blocks)
+          for(size_t index = 0; index < sdp.free_var_matrix.blocks.size();
+              ++index)
             {
               trsm_bytes = std::max(
-                trsm_bytes, get_trsm_bytes(m.Height(), m.Width(),
+                trsm_bytes, get_trsm_bytes(sdp.free_var_block_height(index),
+                                           sdp.free_var_block_width(index),
                                            grid.Height(), grid.Width()));
             }
         }
@@ -120,8 +122,11 @@ namespace
     // #(B) = PxN
     // sdp.free_var_matrix, schur_off_diagonal
     const size_t B_size = node_reduce(get_B_size_local(sdp));
+    // (--sparseB: the dense size, as L^{-1} B is dense)
     const size_t B_bytes
-      = node_reduce(get_allocated_bytes(sdp.free_var_matrix));
+      = sdp.sparse_free_var_matrix
+          ? B_size * bigfloat_bytes()
+          : node_reduce(get_allocated_bytes(sdp.free_var_matrix));
 
     // #Q = NxN, distributed over all nodes.
     const size_t Q_size = node_reduce(get_Q_size_local(sdp));
@@ -156,8 +161,12 @@ namespace
       = Streaming_Syrk::enabled() && block_info.num_nodes() == 1;
     const size_t max_B_block_bytes = node_reduce([&] {
       size_t bytes = 0;
-      for(const auto &block : sdp.free_var_matrix.blocks)
-        bytes = std::max(bytes, get_allocated_bytes(block));
+      for(size_t index = 0; index < sdp.free_var_matrix.blocks.size(); ++index)
+        bytes = std::max(
+          bytes, sdp.sparse_free_var_matrix
+                   ? sdp.free_var_matrix_sparse.at(index).dense_size_local()
+                       * bigfloat_bytes()
+                   : get_allocated_bytes(sdp.free_var_matrix.blocks.at(index)));
       return bytes;
     }());
     SDP_Solver_run_bytes += streaming ? 2 * max_B_block_bytes : B_bytes;
