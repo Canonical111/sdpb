@@ -16,6 +16,7 @@
 
 #include "BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
+#include "sdpb_util/memory_trace.hxx"
 #include "sdpb_util/assert.hxx"
 
 #include <El.hpp>
@@ -200,6 +201,9 @@ namespace Streaming_Syrk
           const auto t2 = clock::now();
           if(with_syrk)
             syrk_context.accumulate_band(blocks, band_timers, block_timings_ms);
+          if(t == num_bands / 2)
+            memory_trace(with_syrk ? "streaming syrk: middle band"
+                                   : "streaming norms: middle band");
           profile.produce += t1 - t0;
           profile.scale += t2 - t1;
           profile.syrk += clock::now() - t2;

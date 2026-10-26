@@ -5,6 +5,7 @@
 #include "sdp_solve/SDP_Solver.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdp_solve/memory_estimates.hxx"
+#include "sdpb_util/memory_trace.hxx"
 
 void scale_multiply_add(const El::BigFloat &alpha,
                         const Block_Diagonal_Matrix &A,
@@ -74,6 +75,7 @@ void SDP_Solver::step(
       print_allocation_message_per_node(env, "dX", get_allocated_bytes(dX));
       print_allocation_message_per_node(env, "dY", get_allocated_bytes(dY));
     }
+  memory_trace("step start");
   {
     // SchurComplementCholesky = L', the Cholesky decomposition of the
     // Schur complement matrix S.
@@ -123,6 +125,7 @@ void SDP_Solver::step(
       }
     scale_multiply_add(El::BigFloat(-1), X, Y, El::BigFloat(0), minus_XY);
     XY_timer.stop();
+    memory_trace("XY computed");
 
     // Compute the complementarity mu = Tr(X Y)/X.dim
     {
@@ -155,6 +158,7 @@ void SDP_Solver::step(
                                X_cholesky, beta_predictor, mu,
                                primal_residue_p, false, Q, dx, dX, dy, dY);
     }
+    memory_trace("predictor done");
 
     // Compute the corrector solution for (dx, dX, dy, dY)
     {
@@ -169,6 +173,7 @@ void SDP_Solver::step(
                                X_cholesky, beta_corrector, mu,
                                primal_residue_p, true, Q, dx, dX, dy, dY);
     }
+    memory_trace("corrector done");
 
     // Calculate condition numbers for Cholesky matrices
     update_cond_numbers(Q, block_info, schur_complement_cholesky, X_cholesky,

@@ -3,6 +3,7 @@
 #include "sdpb_util/Timers/Timers.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdp_solve/memory_estimates.hxx"
+#include "sdpb_util/memory_trace.hxx"
 
 // Compute the quantities needed to solve the Schur complement
 // equation
@@ -50,10 +51,9 @@ void compute_schur_complement(
     &A_Y,
   Block_Diagonal_Matrix &schur_complement, Timers &timers);
 
+// schur_complement_cholesky holds the Schur complement on entry.
 void compute_Q(const Environment &env, const SDP &sdp,
-               const Block_Info &block_info,
-               Block_Diagonal_Matrix &schur_complement,
-               Block_Matrix &schur_off_diagonal,
+               const Block_Info &block_info, Block_Matrix &schur_off_diagonal,
                Block_Diagonal_Matrix &schur_complement_cholesky,
                BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,
                El::DistMatrix<El::BigFloat> &Q, Timers &timers,
@@ -78,18 +78,17 @@ void initialize_schur_complement_solver(
   // block for each 0 <= j < J.  SchurComplement.blocks[j] has dimension
   // (d_j+1)*m_j*(m_j+1)/2
   //
-  Block_Diagonal_Matrix schur_complement(block_info.schur_block_sizes(),
-                                         block_info.block_indices, group_grid);
-  if(verbosity >= Verbosity::trace)
-    {
-      print_allocation_message_per_node(env, "schur_complement",
-                                        get_allocated_bytes(schur_complement));
-    }
-  compute_schur_complement(block_info, A_X_inv, A_Y, schur_complement, timers);
+  // #184: S is only workspace for its Cholesky factor, so it is computed straight into
+  // schur_complement_cholesky and factored in place (compute_Q()), instead of in a second
+  // matrix of the same size that is then copied.
+  compute_schur_complement(block_info, A_X_inv, A_Y, schur_complement_cholesky,
+                           timers);
+  memory_trace("schur complement computed");
 
-  compute_Q(env, sdp, block_info, schur_complement, schur_off_diagonal,
+  compute_Q(env, sdp, block_info, schur_off_diagonal,
             schur_complement_cholesky, bigint_syrk_context, Q, timers,
             block_timings_ms, verbosity);
+  memory_trace("Q computed");
 
   Scoped_Timer Cholesky_timer(timers, "Cholesky_Q");
   try

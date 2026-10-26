@@ -123,18 +123,18 @@ namespace
 
     const auto cfg = get_syrk_Q_config(
       block_info, sdp, parameters.max_memory, parameters.max_shared_memory,
-      mem_required_bytes() + std::max(schur_complement_bytes, SDP_bytes));
+      mem_required_bytes() + SDP_bytes);
 
-    // Add schur_complement + (syrk_S() or Trsm() temporary allocations)
+    // Add (syrk_S() or Trsm() temporary allocations)
     // from initialize_schur_complement_solver()
     // or SDP from quadratic_approximate_objectives()
+    // (#184: the Schur complement is computed in schur_complement_cholesky.)
     // (when allocations do not coexist, we choose maximum size instead of adding both)
     // TODO implement RAII-like simulation of memory allocations/deallocations,
     // to automatically track and print max memory usage.
     const size_t initialize_schur_complement_solver_local_bytes
-      = schur_complement_bytes
-        + std::max(cfg.node_local_bytes(),
-                   initialize_schur_off_diagonal_trsm_bytes);
+      = std::max(cfg.node_local_bytes(),
+                 initialize_schur_off_diagonal_trsm_bytes);
     const size_t initialize_schur_complement_solver_total_bytes
       = initialize_schur_complement_solver_local_bytes
         + cfg.node_shmem_bytes();
@@ -165,7 +165,6 @@ namespace
           {"\t\tSDP", SDP_bytes},
           {"\t\tinitialize_schur_complement_solver()",
            initialize_schur_complement_solver_total_bytes},
-          {"\t\t\tschur_complement", schur_complement_bytes},
           {"\t\t\tEl::Trsm()", initialize_schur_off_diagonal_trsm_bytes},
           {"\t\t\tQ", Q_bytes},
           {"\t\t\tshared memory", cfg.node_shmem_bytes()},

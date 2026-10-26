@@ -4,6 +4,7 @@
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/Matrix_Normalizer.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/streaming_syrk.hxx"
 #include "sdp_solve/memory_estimates.hxx"
+#include "sdpb_util/memory_trace.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
 #include <algorithm>
@@ -13,10 +14,10 @@
 #include <sstream>
 #include <string>
 
-// schur_off_diagonal = L^{-1} B
+// schur_complement_cholesky := its Cholesky factor L (in place: it holds the Schur
+// complement on entry), and schur_off_diagonal = L^{-1} B
 void initialize_schur_off_diagonal(
   const Environment &env, const SDP &sdp, const Block_Info &block_info,
-  Block_Diagonal_Matrix &schur_complement,
   Block_Matrix &schur_off_diagonal,
   Block_Diagonal_Matrix &schur_complement_cholesky, Timers &timers,
   El::Matrix<int32_t> &block_timings_ms, const Verbosity verbosity,
@@ -35,12 +36,6 @@ void initialize_schur_off_diagonal(
       auto block_index_string = std::to_string(global_block_index);
       {
         Scoped_Timer cholesky_timer(timers, "cholesky_" + block_index_string);
-        schur_complement_cholesky.blocks[block]
-          = schur_complement.blocks[block];
-        // #184: the Schur complement is workspace, not used after this copy; free each
-        // block now instead of holding both through compute_Q().
-        schur_complement.blocks[block].Empty();
-
         try
           {
             Cholesky(El::UpperOrLowerNS::LOWER,
@@ -301,9 +296,7 @@ void syrk_Q_streaming(const SDP &sdp, const Block_Info &block_info,
 }
 
 void compute_Q(const Environment &env, const SDP &sdp,
-               const Block_Info &block_info,
-               Block_Diagonal_Matrix &schur_complement,
-               Block_Matrix &schur_off_diagonal,
+               const Block_Info &block_info, Block_Matrix &schur_off_diagonal,
                Block_Diagonal_Matrix &schur_complement_cholesky,
                BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,
                El::DistMatrix<El::BigFloat> &Q, Timers &timers,
@@ -315,9 +308,10 @@ void compute_Q(const Environment &env, const SDP &sdp,
   // #184: streaming leaves schur_off_diagonal empty.
   const bool streaming = Streaming_Syrk::enabled()
                          && bigint_syrk_context.can_accumulate_bands(Q);
-  initialize_schur_off_diagonal(env, sdp, block_info, schur_complement,
-                                schur_off_diagonal, schur_complement_cholesky,
-                                timers, block_timings_ms, verbosity, streaming);
+  initialize_schur_off_diagonal(env, sdp, block_info, schur_off_diagonal,
+                                schur_complement_cholesky, timers,
+                                block_timings_ms, verbosity, streaming);
+  memory_trace(streaming ? "Cholesky done" : "Cholesky and L^{-1} B done");
   if(streaming)
     syrk_Q_streaming(sdp, block_info, schur_complement_cholesky,
                      bigint_syrk_context, Q, timers, block_timings_ms);
