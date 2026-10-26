@@ -104,22 +104,31 @@ TEST_CASE("compressLinvB: Matrix_Normalizer and bigint_syrk_blas")
     INFO("The test runs on one node");
     REQUIRE(El::mpi::Congruent(comm_shmem, comm_world));
   }
-  const int group_size = GENERATE(1, 2, 3, 4, 6);
-  if(comm_world.Size() % group_size != 0)
+  // Quasi-nodes of node_size ranks (as calculate_Block_Matrix_square): on 6
+  // ranks, 1, 2 or 3 nodes, whose Q contributions are reduced over nodes
+  const int node_size = GENERATE(6, 3, 2);
+  const int group_size = GENERATE(1, 2, 3, 6);
+  if(comm_world.Size() % node_size != 0 || node_size % group_size != 0)
     return;
   const int width = GENERATE(1, 5, 13);
   // 0: no split; 1: input window split (3 rows per group); 2: output window
   // split into 3x3 submatrices (two input windows of one row per group)
   const int split = GENERATE(0, 1, 2);
-  DYNAMIC_SECTION("group_size=" << group_size << " width=" << width
-                                << " split=" << split)
+  DYNAMIC_SECTION("node_size=" << node_size << " group_size=" << group_size
+                               << " width=" << width << " split=" << split)
   {
     const int bits = El::gmp::Precision();
+    El::mpi::Comm node_comm;
+    MPI_Comm_split(comm_world.comm, comm_world.Rank() / node_size, 0,
+                   &node_comm.comm);
     El::mpi::Comm group_comm;
-    MPI_Comm_split(comm_world.comm, comm_world.Rank() / group_size, 0,
+    MPI_Comm_split(node_comm.comm, node_comm.Rank() / group_size, 0,
                    &group_comm.comm);
-    const int group_index = comm_world.Rank() / group_size;
-    const int num_groups = comm_world.Size() / group_size;
+    // index of the group in its node, and over all nodes
+    const int group_index = node_comm.Rank() / group_size;
+    const int num_groups = node_size / group_size;
+    const int global_group_index
+      = (comm_world.Rank() / node_size) * num_groups + group_index;
     const El::Grid grid(group_comm);
 
     // Three blocks per group, of heights 7, 20, 3; zero columns: ~0, 50%, 100%
@@ -130,9 +139,9 @@ TEST_CASE("compressLinvB: Matrix_Normalizer and bigint_syrk_blas")
     std::vector<size_t> block_indices;
     for(size_t b = 0; b < heights.size(); ++b)
       {
-        const unsigned seed = 1000 * group_index + 17 * b + width;
-        const auto nonzero = random_nonzero_columns(
-          width, b == 1 ? zero_fraction[b] : zero_fraction[b], seed);
+        const unsigned seed = 1000 * global_group_index + 17 * b + width;
+        const auto nonzero
+          = random_nonzero_columns(width, zero_fraction[b], seed);
         // Same matrix on all ranks of the group: generated on its root
         El::DistMatrix<El::BigFloat, El::CIRC, El::CIRC> root(heights[b],
                                                              width, grid);
@@ -148,9 +157,10 @@ TEST_CASE("compressLinvB: Matrix_Normalizer and bigint_syrk_blas")
         maps.push_back(owner_preserving_column_map(nonzero, grid.Width()));
         compressed.push_back(compress_columns(dense.back(), maps.back()));
         require_columns_equal(dense.back(), compressed.back(), maps.back());
-        block_indices.push_back(group_index * heights.size() + b);
+        block_indices.push_back(global_group_index * heights.size() + b);
       }
 
+    // per node
     const int total_height = num_groups * (7 + 20 + 3);
     const auto num_primes
       = Fmpz_Comb(bits, bits, 1, total_height).num_primes;
@@ -179,12 +189,13 @@ TEST_CASE("compressLinvB: Matrix_Normalizer and bigint_syrk_blas")
         norms.push_back(normalizer.column_norms);
         normalizer.normalize_and_shift_P_blocks(P, column_maps);
         BigInt_Shared_Memory_Syrk_Context context(
-          comm_world, group_index, group_comm_sizes, bits,
+          node_comm, group_index, group_comm_sizes, bits,
           max_shared_memory_bytes, heights_per_group, width, block_indices,
           Verbosity::none);
         El::DistMatrix<El::BigFloat> Q(width, width);
         Timers timers;
-        El::Matrix<int32_t> block_timings_ms(num_groups * heights.size(), 1);
+        El::Matrix<int32_t> block_timings_ms(
+          comm_world.Size() / group_size * heights.size(), 1);
         El::Zero(block_timings_ms);
         context.bigint_syrk_blas(El::UPPER, P, Q, timers, block_timings_ms,
                                  column_maps);
