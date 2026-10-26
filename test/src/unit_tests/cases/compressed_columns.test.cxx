@@ -16,7 +16,8 @@
 // nonzero columns only (compressed_columns.hxx), must give bitwise the same
 // results as the dense matrix in
 // - Matrix_Normalizer and the bigint syrk Q = P^T P (column maps), with and
-//   without splitting the input residue window;
+//   without splitting the residue windows; with the BLAS jobs on the
+//   nonzero column runs (default) or on full rows (SDPB_COMPRESS_SYRK=0);
 // - the multimodular and El solves L^{-1} B, whose algorithm depends on the
 //   width (the compressed solve chooses by the dense width).
 
@@ -107,8 +108,9 @@ TEST_CASE("compressLinvB: Matrix_Normalizer and bigint_syrk_blas")
   if(comm_world.Size() % group_size != 0)
     return;
   const int width = GENERATE(1, 5, 13);
-  // 0: no split; 1: input window split (3 rows per group)
-  const int split = GENERATE(0, 1);
+  // 0: no split; 1: input window split (3 rows per group); 2: output window
+  // split into 3x3 submatrices (two input windows of one row per group)
+  const int split = GENERATE(0, 1, 2);
   DYNAMIC_SECTION("group_size=" << group_size << " width=" << width
                                 << " split=" << split)
   {
@@ -157,6 +159,12 @@ TEST_CASE("compressLinvB: Matrix_Normalizer and bigint_syrk_blas")
       max_shared_memory_bytes
         = (size_t(width) * width + 3 * size_t(num_groups) * width) * num_primes
           * sizeof(double);
+    if(split == 2)
+      {
+        const size_t q = (width + 2) / 3;
+        max_shared_memory_bytes
+          = (q * q + 2 * size_t(num_groups) * q) * num_primes * sizeof(double);
+      }
     std::vector<int> group_comm_sizes(num_groups, group_size);
     std::vector<El::Int> heights_per_group(num_groups, 7 + 20 + 3);
 

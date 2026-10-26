@@ -11,6 +11,22 @@
 #include <optional>
 #include <vector>
 
+// sdpb --compressLinvB (lab #170): the nonzero columns of one block of P, as
+// sorted disjoint ranges of global columns, and the block's height
+struct Block_Column_Runs
+{
+  El::Int height = 0;
+  std::vector<El::Range<El::Int>> runs;
+};
+
+// A range of rows of the input residue window whose nonzero columns are in
+// runs (no runs: zero padding rows)
+struct Window_Row_Segment
+{
+  El::Range<El::Int> rows;
+  std::vector<El::Range<El::Int>> runs;
+};
+
 class BigInt_Shared_Memory_Syrk_Context : boost::noncopyable
 {
 public:
@@ -109,7 +125,19 @@ private:
     const std::vector<El::DistMatrix<El::BigFloat>> &bigint_input_matrix_blocks,
     const El::Range<El::Int> &output_I, const El::Range<El::Int> &output_J,
     Timers &timers, El::Matrix<int32_t> &block_timings_ms,
-    const std::vector<std::vector<El::Int>> *column_inverse_maps = nullptr);
+    const std::vector<std::vector<El::Int>> *column_inverse_maps = nullptr,
+    const std::vector<std::vector<Block_Column_Runs>> *node_column_runs
+    = nullptr);
+
+  // --compressLinvB: for each MPI group on the node, the column runs of its
+  // blocks, in the order of the window (gathered over shared_memory_comm)
+  std::vector<std::vector<Block_Column_Runs>> gather_node_column_runs(
+    const std::vector<El::DistMatrix<El::BigFloat>> &bigint_input_matrix_blocks,
+    const std::vector<std::vector<El::Int>> &column_maps, El::Int width) const;
+  // Row segments of the input window filled at split iteration iter
+  std::vector<Window_Row_Segment> window_row_segments(
+    const std::vector<std::vector<Block_Column_Runs>> &node_column_runs,
+    size_t iter) const;
 
   void
   restore_and_reduce(std::optional<El::UpperOrLower> uplo,
