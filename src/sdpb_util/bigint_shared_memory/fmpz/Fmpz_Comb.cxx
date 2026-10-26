@@ -20,7 +20,8 @@ namespace
   // adapted from FLINT, fmpz_mat/mul_blas.c
   // TODO replace C-style allocation with std::vector::resize()
   mp_limb_t *_calculate_primes(slong *num_primes_, flint_bitcnt_t bits,
-                               slong k, Fmpz_BigInt &primes_product)
+                               slong k, bool cap_primes,
+                               Fmpz_BigInt &primes_product)
   {
     slong num_primes, primes_alloc;
     mp_limb_t *primes;
@@ -28,7 +29,7 @@ namespace
     fmpz_t &prod = primes_product.value;
 
     p = 2 + 2 * n_sqrt((MAX_BLAS_DP_INT - 1) / (ulong)k);
-    if(bits > 200)
+    if(bits > 200 || cap_primes)
       {
         /* if mod is the bottleneck, ensure p1*p2*p3 < 2^62 */
         p = FLINT_MIN(p, UWORD(1664544));
@@ -75,10 +76,12 @@ namespace
   }
 
   std::vector<mp_limb_t>
-  calculate_primes(flint_bitcnt_t bits, slong k, Fmpz_BigInt &primes_product)
+  calculate_primes(flint_bitcnt_t bits, slong k, bool cap_primes,
+                   Fmpz_BigInt &primes_product)
   {
     slong n;
-    mp_limb_t *primes = _calculate_primes(&n, bits, k, primes_product);
+    mp_limb_t *primes
+      = _calculate_primes(&n, bits, k, cap_primes, primes_product);
     // TODO test this case (happens with low precision) and add workaround
     ASSERT(primes != NULL, "Failed to calculate primes for bits=", bits,
            "k=", k);
@@ -89,9 +92,9 @@ namespace
   }
 }
 
-Fmpz_Comb::Fmpz_Comb(mp_limb_t bits, mp_limb_signed_t k)
+Fmpz_Comb::Fmpz_Comb(mp_limb_t bits, mp_limb_signed_t k, bool cap_primes)
 {
-  primes = calculate_primes(bits, k, primes_product);
+  primes = calculate_primes(bits, k, cap_primes, primes_product);
   num_primes = primes.size();
   mods.resize(num_primes);
   shifts.resize(num_primes);
@@ -107,8 +110,8 @@ Fmpz_Comb::Fmpz_Comb(mp_limb_t bits, mp_limb_signed_t k)
 }
 
 Fmpz_Comb::Fmpz_Comb(mp_limb_t Abits, mp_limb_t Bbits, int sign,
-                     mp_limb_signed_t k)
-    : Fmpz_Comb(calculate_output_bits(Abits, Bbits, sign, k), k)
+                     mp_limb_signed_t k, bool cap_primes)
+    : Fmpz_Comb(calculate_output_bits(Abits, Bbits, sign, k), k, cap_primes)
 {}
 
 Fmpz_Comb::~Fmpz_Comb()

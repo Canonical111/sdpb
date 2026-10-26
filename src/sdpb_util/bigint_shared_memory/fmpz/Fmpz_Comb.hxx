@@ -29,7 +29,10 @@ struct Fmpz_Comb : boost::noncopyable
   //   sign = 0 if A and B are non-negative, 1 otherwise
   //   k = A.Width() = B.Height()
   //   bits = Abits + Bbits + bits(k) + sign
-  Fmpz_Comb(flint_bitcnt_t bits, slong k);
-  Fmpz_Comb(flint_bitcnt_t Abits, flint_bitcnt_t Bbits, int sign, slong k);
+  // Primes are < 2^21 when bits > 200 (FLINT's cap); cap_primes applies the cap at
+  // every bits (#184: band accumulation stores residues as float).
+  Fmpz_Comb(flint_bitcnt_t bits, slong k, bool cap_primes = false);
+  Fmpz_Comb(flint_bitcnt_t Abits, flint_bitcnt_t Bbits, int sign, slong k,
+            bool cap_primes = false);
   ~Fmpz_Comb();
 };
