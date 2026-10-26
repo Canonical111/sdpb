@@ -3,6 +3,9 @@
 #include "sdpb_util/bigint_shared_memory/fmpz/residues.hxx"
 #include "sdpb_util/assert.hxx"
 
+#include <cstdlib>
+#include <string>
+
 // compute residues and put them to shared window
 // NB: input blocks should be BigInt matrix (normalized matrix, multiplied by 2^N)
 
@@ -201,6 +204,137 @@ namespace
   }
 }
 
+namespace
+{
+  // lab (bfss #77), read once per process
+  bool lab_env_is_1(const char *name)
+  {
+    const char *env = std::getenv(name);
+    return env != nullptr && std::string(env) == "1";
+  }
+  bool lab_syrk_blas_residues()
+  {
+    static const bool value = lab_env_is_1("LAB_SYRK_BLAS_RESIDUES");
+    return value;
+  }
+  bool lab_syrk_contiguous_residues()
+  {
+    static const bool value = lab_syrk_blas_residues()
+                              || lab_env_is_1("LAB_SYRK_CONTIGUOUS_RESIDUES");
+    return value;
+  }
+}
+
+// lab (bfss #77): residues of the input window in contiguous order, as the
+// contiguous G conversions of initialize_P (bfss #68). A rank owning only
+// every r-th element of a column (blocks on 4+ ranks) would otherwise write
+// every r-th double of lines that the other ranks of its grid also write.
+// Owners serialize their elements into a node-shared staging window, indexed
+// like the elements of one prime of the residues window; then the ranks of
+// the group compute the residues of contiguous ranges of the group's residue
+// matrix, by FLINT (LAB_SYRK_CONTIGUOUS_RESIDUES=1) or by BLAS
+// (LAB_SYRK_BLAS_RESIDUES=1, blas_conversions.hxx). Same doubles either way.
+void BigInt_Shared_Memory_Syrk_Context::lab_compute_residues_contiguous(
+  Vertical_Block_Matrix_Residues_Window<double> &window,
+  const std::vector<El::DistMatrix<El::BigFloat>> &block_views,
+  Timers &timers)
+{
+  const size_t value_size = El::BigFloat().SerializedSize();
+  const size_t bytes = window.prime_stride * value_size;
+  if(!lab_staging || lab_staging->size() < bytes)
+    {
+      lab_staging.reset();
+      lab_staging = std::make_unique<Shared_Window_Array<El::byte>>(
+        shared_memory_comm, bytes);
+    }
+  El::byte *staging = lab_staging->data();
+  auto &group_matrix = window.block_residues.at(0).at(group_index);
+  const double *base = window.residues.at(0).LockedBuffer();
+  {
+    Scoped_Timer serialize_timer(timers, "serialize");
+    int row_begin = 0;
+    for(const auto &view : block_views)
+      {
+        for(int jLoc = 0; jLoc < view.LocalWidth(); ++jLoc)
+          {
+            const int j = view.GlobalCol(jLoc);
+            for(int iLoc = 0; iLoc < view.LocalHeight(); ++iLoc)
+              {
+                const int i = view.GlobalRow(iLoc);
+                const double *first_residue
+                  = group_matrix.LockedBuffer(row_begin + i, j);
+                view.GetLocalCRef(iLoc, jLoc).Serialize(
+                  staging + (first_residue - base) * value_size);
+              }
+          }
+        row_begin += view.Height();
+      }
+    ASSERT_EQUAL(row_begin, group_matrix.Height());
+  }
+  {
+    Scoped_Timer fence_timer(timers, "staging_fence");
+    lab_staging->Fence();
+  }
+  {
+    Scoped_Timer convert_timer(timers, "convert");
+    const size_t height = group_matrix.Height();
+    const size_t width = group_matrix.Width();
+    const auto &comm = block_views.at(0).DistComm();
+    const size_t group_size = comm.Size();
+    const size_t group_rank = comm.Rank();
+    const size_t n = height * width;
+    const size_t k_begin = n * group_rank / group_size;
+    const size_t k_end = n * (group_rank + 1) / group_size;
+    if(lab_syrk_blas_residues())
+      {
+        if(!lab_blas_context)
+          lab_blas_context = std::make_unique<Lab_Blas_Conversions::Context>(
+            comb, El::gmp::Precision() + 2);
+        constexpr size_t batch = Lab_Blas_Conversions::batch_size;
+        Lab_Blas_Conversions::Workspace work(*lab_blas_context);
+        std::vector<El::BigFloat> values(batch);
+        std::vector<const El::BigFloat *> value_ptrs(batch);
+        std::vector<double *> out_ptrs(batch);
+        for(size_t k0 = k_begin; k0 < k_end; k0 += batch)
+          {
+            const size_t nb = std::min(batch, k_end - k0);
+            for(size_t e = 0; e < nb; ++e)
+              {
+                const size_t k = k0 + e;
+                double *first_residue
+                  = group_matrix.Buffer(k % height, k / height);
+                values[e].Deserialize(staging
+                                      + (first_residue - base) * value_size);
+                value_ptrs[e] = &values[e];
+                out_ptrs[e] = first_residue;
+              }
+            Lab_Blas_Conversions::compute_residues(
+              *lab_blas_context, nb, value_ptrs.data(), out_ptrs.data(),
+              window.prime_stride, work);
+          }
+      }
+    else
+      {
+        Fmpz_BigInt bigint_value;
+        El::BigFloat value;
+        for(size_t k = k_begin; k < k_end; ++k)
+          {
+            double *first_residue
+              = group_matrix.Buffer(k % height, k / height);
+            value.Deserialize(staging + (first_residue - base) * value_size);
+            bigint_value.from_BigFloat(value);
+            bigint_to_residues(bigint_value, comb, first_residue,
+                               window.prime_stride);
+          }
+      }
+  }
+  {
+    // Orders the reads of staging before its next reuse.
+    Scoped_Timer fence_timer(timers, "staging_fence_2");
+    lab_staging->Fence();
+  }
+}
+
 // Each rank computes residues for locally stored block elements and puts them into shared memory window.
 // Memory access to the window is more expensive (up to ~10x in our tests) than access to local memory.
 // Because of that, we want to compute many residues locally and then memcpy the resulting array to the window.
@@ -281,12 +415,18 @@ void BigInt_Shared_Memory_Syrk_Context::compute_block_residues(
       ASSERT_EQUAL(block_views_height, input_group_height_per_prime());
     }
 
-    std::vector<double> column_residues_buffer_temp;
-    for(int global_col = 0; global_col < width; ++global_col)
+    if(lab_syrk_contiguous_residues())
+      lab_compute_residues_contiguous(grouped_block_residues_window,
+                                      block_views, timers);
+    else
       {
-        compute_column_residues(group_index, block_views, global_col, comb,
-                                grouped_block_residues_window,
-                                column_residues_buffer_temp);
+        std::vector<double> column_residues_buffer_temp;
+        for(int global_col = 0; global_col < width; ++global_col)
+          {
+            compute_column_residues(group_index, block_views, global_col,
+                                    comb, grouped_block_residues_window,
+                                    column_residues_buffer_temp);
+          }
       }
 
     // Update block timings.

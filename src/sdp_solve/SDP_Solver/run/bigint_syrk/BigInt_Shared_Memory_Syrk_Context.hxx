@@ -3,6 +3,7 @@
 #include "Bigint_Syrk_Config.hxx"
 #include "blas_jobs/create_blas_job_schedule.hxx"
 #include "sdpb_util/bigint_shared_memory/fmpz/Fmpz_Comb.hxx"
+#include "sdpb_util/bigint_shared_memory/fmpz/blas_conversions.hxx"
 #include "sdpb_util/bigint_shared_memory/Vertical_Block_Matrix_Residues_Window.hxx"
 #include "sdpb_util/bigint_shared_memory/Matrix_Residues_Window.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
@@ -104,4 +105,13 @@ private:
                      El::DistMatrix<El::BigFloat> &output, Timers &timers);
 
   [[nodiscard]] El::Int input_group_height_per_prime() const;
+
+  // lab (bfss #77): LAB_SYRK_CONTIGUOUS_RESIDUES=1 / LAB_SYRK_BLAS_RESIDUES=1
+  std::unique_ptr<Shared_Window_Array<El::byte>> lab_staging;
+  std::unique_ptr<Lab_Blas_Conversions::Context> lab_blas_context;
+  void lab_compute_residues_contiguous(
+    Vertical_Block_Matrix_Residues_Window<double>
+      &grouped_block_residues_window,
+    const std::vector<El::DistMatrix<El::BigFloat>> &block_views,
+    Timers &timers);
 };
