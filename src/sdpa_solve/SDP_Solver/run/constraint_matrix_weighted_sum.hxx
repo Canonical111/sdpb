@@ -25,7 +25,8 @@ namespace Sdpb::Sdpa
         const auto &per_block = sdp.sparse_F.entries.at(local_block);
         for(size_t i = 0; i < m; ++i)
           {
-            sparse_axpy_local(a.Get(i, 0), per_block.at(i), result_block);
+            sparse_axpy_local(a.Get(i, 0), per_block.at(i), sdp.sparse_F.values,
+                              result_block);
           }
       }
   }

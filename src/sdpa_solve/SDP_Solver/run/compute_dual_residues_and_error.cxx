@@ -26,7 +26,8 @@ namespace Sdpb::Sdpa
             // Per-block subtotal first, like dotu() over Block_Diagonal_Matrix:
             // the summation tree (and so the rounding) matches the dense path.
             El::BigFloat block_sum(0);
-            sparse_dotu_local_update(per_block.at(i), Y_block, block_sum);
+            sparse_dotu_local_update(per_block.at(i), sdp.sparse_F.values, Y_block,
+                                     block_sum);
             traces.at(i) += block_sum;
           }
       }

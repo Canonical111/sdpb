@@ -24,15 +24,17 @@
 
 #include <El.hpp>
 
+#include <cstdint>
 #include <vector>
 
 namespace Sdpb::Sdpa
 {
+  // value_index points into Sparse_F_Matrices::values (bit-identical values share a slot).
   struct Sparse_F_Entry
   {
-    El::Int row;
-    El::Int col;
-    El::BigFloat value;
+    int32_t row;
+    int32_t col;
+    uint32_t value_index;
   };
 
   struct Sparse_F_Matrices
@@ -40,6 +42,8 @@ namespace Sdpb::Sdpa
     size_t primal_dimension = 0;
     // [local_block][constraint 0..m-1] -> entries of F_{constraint+1}
     std::vector<std::vector<std::vector<Sparse_F_Entry>>> entries;
+    // Distinct entry values, shared by all local blocks.
+    std::vector<El::BigFloat> values;
 
     size_t num_entries() const
     {
@@ -50,11 +54,12 @@ namespace Sdpb::Sdpa
       return n;
     }
 
-    // Heap footprint estimate: the entry structs plus each BigFloat's limb allocation.
+    // Heap footprint estimate: the index entries plus the value table (struct + limbs).
     size_t heap_bytes() const
     {
-      const size_t limb_bytes = (El::gmp::Precision() + 63) / 64 * 8;
-      return num_entries() * (sizeof(Sparse_F_Entry) + limb_bytes);
+      const size_t limb_bytes = ((El::gmp::Precision() + 63) / 64 + 2) * 8;
+      return num_entries() * sizeof(Sparse_F_Entry)
+             + values.size() * (sizeof(El::BigFloat) + limb_bytes);
     }
   };
 
@@ -62,14 +67,15 @@ namespace Sdpb::Sdpa
   // B must be stored full (both halves), as X and Y are here.
   inline void
   sparse_dotu_local_update(const std::vector<Sparse_F_Entry> &entries,
+                           const std::vector<El::BigFloat> &values,
                            const El::DistMatrix<El::BigFloat> &B,
                            El::BigFloat &local_sum)
   {
     for(const auto &e : entries)
       {
         if(B.IsLocal(e.row, e.col))
-          local_sum
-            += e.value * B.GetLocal(B.LocalRow(e.row), B.LocalCol(e.col));
+          local_sum += values[e.value_index]
+                       * B.GetLocal(B.LocalRow(e.row), B.LocalCol(e.col));
       }
   }
 
@@ -83,6 +89,7 @@ namespace Sdpb::Sdpa
   // matched the same way in sparse_dotu_local_update above.
   inline void sparse_axpy_local(const El::BigFloat &a,
                                 const std::vector<Sparse_F_Entry> &entries,
+                                const std::vector<El::BigFloat> &values,
                                 El::DistMatrix<El::BigFloat> &result)
   {
     const El::BigFloat one(1);
@@ -93,19 +100,21 @@ namespace Sdpb::Sdpa
           // destination state rounds the contribution exactly as the dense
           // path's += did.
           result.UpdateLocal(result.LocalRow(e.row), result.LocalCol(e.col),
-                             one * (e.value * a));
+                             one * (values[e.value_index] * a));
       }
   }
 
   // dest := F_i for one block: zero, then scatter, locally-owned elements only.
   inline void sparse_densify_local(const std::vector<Sparse_F_Entry> &entries,
+                                   const std::vector<El::BigFloat> &values,
                                    El::DistMatrix<El::BigFloat> &dest)
   {
     El::Zero(dest);
     for(const auto &e : entries)
       {
         if(dest.IsLocal(e.row, e.col))
-          dest.SetLocal(dest.LocalRow(e.row), dest.LocalCol(e.col), e.value);
+          dest.SetLocal(dest.LocalRow(e.row), dest.LocalCol(e.col),
+                        values[e.value_index]);
       }
   }
 }

@@ -69,6 +69,22 @@ namespace Sdpb::Sdpa
           per_block.resize(m);
       }
 
+      // The value table: group rank 0 parsed it; every rank of the group keeps a copy
+      // (it is small -- 106k values on 12_min -- and entries index it directly).
+      {
+        long long num_values
+          = comm.Rank() == 0
+              ? static_cast<long long>(parse_result.F_values.size())
+              : 0;
+        El::mpi::Broadcast(num_values, 0, comm);
+        if(comm.Rank() == 0)
+          sparse_F.values = std::move(parse_result.F_values);
+        else
+          sparse_F.values.resize(num_values);
+        if(num_values > 0 && comm.Size() > 1)
+          El::mpi::Broadcast(sparse_F.values.data(), num_values, 0, comm);
+      }
+
       // Synchronize the triplets: group rank 0 parsed them; broadcast per local block.
       // Every rank of the block's grid keeps the full (small) list; dense operands stay
       // distributed and consumers only touch locally-owned elements.
@@ -100,7 +116,7 @@ namespace Sdpb::Sdpa
                      && sorted_entries.back().constraint == e.constraint
                      && sorted_entries.back().row == e.row
                      && sorted_entries.back().col == e.col)
-                    sorted_entries.back().value = e.value;
+                    sorted_entries.back().value_index = e.value_index;
                   else
                     sorted_entries.push_back(e);
                 }
@@ -108,33 +124,35 @@ namespace Sdpb::Sdpa
               parsed.shrink_to_fit();
             }
 
-          // Broadcast count, index arrays, and values over the group communicator.
+          // Broadcast count and the index arrays over the group communicator.
           long long count = static_cast<long long>(sorted_entries.size());
           El::mpi::Broadcast(count, 0, comm);
-          std::vector<El::Int> constraints(count), rows(count), cols(count);
-          std::vector<El::BigFloat> values(count);
+          std::vector<El::Int> constraints(count), rows(count), cols(count),
+            slots(count);
           if(comm.Rank() == 0)
-            for(size_t k = 0; k < count; ++k)
+            for(long long k = 0; k < count; ++k)
               {
-                constraints.at(k)
-                  = static_cast<El::Int>(sorted_entries.at(k).constraint);
-                rows.at(k) = sorted_entries.at(k).row;
-                cols.at(k) = sorted_entries.at(k).col;
-                values.at(k) = sorted_entries.at(k).value;
+                const auto &e = sorted_entries.at(k);
+                constraints.at(k) = static_cast<El::Int>(e.constraint);
+                rows.at(k) = e.row;
+                cols.at(k) = e.col;
+                slots.at(k) = static_cast<El::Int>(e.value_index);
               }
-          if(count > 0)
+          sorted_entries.clear();
+          sorted_entries.shrink_to_fit();
+          if(count > 0 && comm.Size() > 1)
             {
               El::mpi::Broadcast(constraints.data(), count, 0, comm);
               El::mpi::Broadcast(rows.data(), count, 0, comm);
               El::mpi::Broadcast(cols.data(), count, 0, comm);
-              El::mpi::Broadcast(values.data(), count, 0, comm);
+              El::mpi::Broadcast(slots.data(), count, 0, comm);
             }
 
           // F_0 is densified; F_1..m stay triplets.
           auto &F_0_block = sdp_block_F_0.blocks.at(local_block_index);
           El::Zero(F_0_block);
           auto &per_block = sparse_F.entries.at(local_block_index);
-          for(size_t k = 0; k < count; ++k)
+          for(long long k = 0; k < count; ++k)
             {
               const auto constraint = static_cast<size_t>(constraints.at(k));
               if(constraint == 0)
@@ -142,14 +160,18 @@ namespace Sdpb::Sdpa
                   if(F_0_block.IsLocal(rows.at(k), cols.at(k)))
                     F_0_block.SetLocal(F_0_block.LocalRow(rows.at(k)),
                                        F_0_block.LocalCol(cols.at(k)),
-                                       values.at(k));
+                                       sparse_F.values.at(slots.at(k)));
                 }
               else
                 {
                   per_block.at(constraint - 1)
-                    .push_back({rows.at(k), cols.at(k), values.at(k)});
+                    .push_back({static_cast<int32_t>(rows.at(k)),
+                                static_cast<int32_t>(cols.at(k)),
+                                static_cast<uint32_t>(slots.at(k))});
                 }
             }
+          for(auto &per_i : per_block)
+            per_i.shrink_to_fit();
         }
     }
 
@@ -204,6 +226,8 @@ namespace Sdpb::Sdpa
                        && e.col < El::Int(dim),
                      error_prefix_index, "F entry out of range: (", e.row,
                      ",", e.col, "), dim=", dim);
+              ASSERT(e.value_index < sparse_F.values.size(),
+                     error_prefix_index, "F value index out of range");
             }
       }
   }

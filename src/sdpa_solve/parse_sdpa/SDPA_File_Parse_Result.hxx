@@ -4,6 +4,7 @@
 
 #include <El.hpp>
 
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -12,14 +13,15 @@
 namespace Sdpb::Sdpa
 {
   // One parsed nonzero of F_{constraint} (constraint = 0 means F_0), solver block indices,
-  // both symmetric halves emitted by the reader.
+  // both symmetric halves emitted by the reader. The value lives in
+  // SDPA_File_Parse_Result::F_values; bit-identical values share one slot.
   struct Parsed_F_Entry
   {
     // 0..m, where 0 is F_0
-    size_t constraint;
-    El::Int row;
-    El::Int col;
-    El::BigFloat value;
+    uint32_t constraint;
+    int32_t row;
+    int32_t col;
+    uint32_t value_index;
   };
 
   struct SDPA_File_Parse_Result
@@ -34,6 +36,9 @@ namespace Sdpb::Sdpa
     // BigFloats per block, i.e. the whole dense set a second time during setup. The .dat-s
     // format is itself a triplet list, so triplets are what we keep.
     std::map<size_t, std::vector<Parsed_F_Entry>> parsed_block_entries;
+    // Distinct values of all parsed F entries. Bootstrap SDPs reuse values heavily
+    // (12_min: 535k entries, 106k distinct), and a 512-bit BigFloat costs ~136 B.
+    std::vector<El::BigFloat> F_values;
 
     SDPA_File_Parse_Result() = default;
 

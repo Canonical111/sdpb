@@ -26,11 +26,9 @@ namespace Sdpb::Sdpa
   inline size_t get_SDP_size_local(const SDP &sdp)
   {
     // #184: F_1..F_m are sparse triplets; only F_0 is dense.
-    const size_t limb_bytes = (El::gmp::Precision() + 63) / 64 * 8;
     size_t SDP_size
       = get_matrix_size_local(sdp.sdp_block_F_0)
-        + sdp.sparse_F.num_entries()
-            * ((sizeof(Sparse_F_Entry) + limb_bytes) / bigfloat_bytes() + 1)
+        + sdp.sparse_F.heap_bytes() / bigfloat_bytes() + 1
         + sdp.primal_objective_c.AllocatedMemory();
     return SDP_size;
   }

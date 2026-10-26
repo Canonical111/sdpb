@@ -7,6 +7,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <unordered_map>
+#include <string>
+#include <cstring>
 #include <boost/iostreams/filtering_stream.hpp>
 #include <boost/iostreams/device/file.hpp>
 #include <boost/iostreams/filter/gzip.hpp>
@@ -307,20 +310,40 @@ namespace Sdpb::Sdpa
           result.parsed_block_entries.try_emplace(index);
       }
 
+    // Interning key: the exact mpf state (size, exponent, limbs). Two values with the
+    // same key are the same bits, so sharing one BigFloat changes no arithmetic.
+    std::unordered_map<std::string, uint32_t> value_slots;
+    const auto intern = [&](const El::BigFloat &value) -> uint32_t {
+      const auto *f = value.gmp_float.get_mpf_t();
+      const int size = f->_mp_size;
+      const long exp = f->_mp_exp;
+      const size_t limb_bytes = std::abs(size) * sizeof(mp_limb_t);
+      std::string key(sizeof(size) + sizeof(exp) + limb_bytes, '\0');
+      std::memcpy(key.data(), &size, sizeof(size));
+      std::memcpy(key.data() + sizeof(size), &exp, sizeof(exp));
+      std::memcpy(key.data() + sizeof(size) + sizeof(exp), f->_mp_d,
+                  limb_bytes);
+      const auto [it, inserted] = value_slots.try_emplace(
+        std::move(key), static_cast<uint32_t>(result.F_values.size()));
+      if(inserted)
+        result.F_values.push_back(value);
+      return it->second;
+    };
+
     const auto accept_sdpa_entry = [&](SDPA_Matrix_Entry &&sdpa_entry) {
       const Result_Matrix_Entry entry(sdpa_entry, block_structure);
-      const auto i = entry.i;
-      const auto j = entry.j;
+      const auto i = static_cast<int32_t>(entry.i);
+      const auto j = static_cast<int32_t>(entry.j);
 
       if(!should_parse_block(entry.sdp_block_index))
         return;
 
+      const auto constraint = static_cast<uint32_t>(entry.vector_index);
+      const auto slot = intern(entry.value);
       auto &entries = result.parsed_block_entries.at(entry.sdp_block_index);
-      entries.push_back({entry.vector_index, static_cast<El::Int>(i),
-                         static_cast<El::Int>(j), entry.value});
+      entries.push_back({constraint, i, j, slot});
       if(i != j && file_type == SDPA_File_Type::sparse)
-        entries.push_back({entry.vector_index, static_cast<El::Int>(j),
-                           static_cast<El::Int>(i), entry.value});
+        entries.push_back({constraint, j, i, slot});
     };
 
     switch(file_type)

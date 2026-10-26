@@ -143,7 +143,7 @@ namespace Sdpb::Sdpa
               {
                 sparse_densify_local(
                   sdp.sparse_F.entries.at(local_block).at(p),
-                  G_p.blocks.at(local_block));
+                  sdp.sparse_F.values, G_p.blocks.at(local_block));
               }
           }
         if(verbosity >= Verbosity::trace && p_begin == 0)
