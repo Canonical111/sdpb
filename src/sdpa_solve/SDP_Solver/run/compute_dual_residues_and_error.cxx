@@ -1,3 +1,4 @@
+#include "lab_batched_traces.hxx"
 #include "sdpa_solve/SDP_Solver.hxx"
 
 namespace Sdpb::Sdpa
@@ -11,6 +12,17 @@ namespace Sdpb::Sdpa
   {
     Scoped_Timer dual_residues_timer(timers, "computeDualResidues");
     dual_residues = sdp.primal_objective_c;
+    if(lab_batched_traces())
+      {
+        const auto traces = lab_traces(sdp, Y);
+        for(int i = 0; i < dual_residues.Height(); ++i)
+          {
+            const auto d = dual_residues.Get(i, 0);
+            dual_residues.Set(i, 0, d - traces.at(i));
+          }
+        dual_error = El::MaxAbs(dual_residues);
+        return;
+      }
     for(int i = 0; i < dual_residues.Height(); ++i)
       {
         const auto d = dual_residues.Get(i, 0);

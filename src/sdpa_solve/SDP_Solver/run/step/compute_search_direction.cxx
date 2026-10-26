@@ -1,4 +1,5 @@
 #include "sdpa_solve/SDP_Solver/run/constraint_matrix_weighted_sum.hxx"
+#include "sdpa_solve/SDP_Solver/run/lab_batched_traces.hxx"
 #include "sdpa_solve/SDP_Solver.hxx"
 
 // Compute the search direction (dx, dX, dy, dY) for the predictor and corrector phases.
@@ -10,6 +11,16 @@ namespace Sdpb::Sdpa
   compute_schur_RHS(const SDP &sdp, const Primal_Dist_Vector &dual_residues,
                     const Block_Diagonal_Matrix &Z, Primal_Dist_Vector &dx)
   {
+    if(lab_batched_traces())
+      {
+        const auto traces = lab_traces(sdp, Z);
+        for(size_t p = 0; p < sdp.primal_dimension(); ++p)
+          {
+            const auto d_p = dual_residues.Get(p, 0);
+            dx.Set(p, 0, -d_p - traces.at(p));
+          }
+        return;
+      }
     for(size_t p = 0; p < sdp.primal_dimension(); ++p)
       {
         const auto d_p = dual_residues.Get(p, 0);
