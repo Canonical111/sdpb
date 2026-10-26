@@ -46,7 +46,9 @@ Fmpz_Comb Bigint_Syrk_Config::comb() const
   const size_t max_additions = input_height;
   // Allow negative values
   const int sign = 1;
-  return Fmpz_Comb(bits, bits, sign, max_additions);
+  // Band accumulation (full_width_input) keeps residues as float, exact only for
+  // primes < 2^24: cap the primes at every precision, not only above 200 bits.
+  return Fmpz_Comb(bits, bits, sign, max_additions, full_width_input);
 }
 size_t Bigint_Syrk_Config::num_primes() const
 {

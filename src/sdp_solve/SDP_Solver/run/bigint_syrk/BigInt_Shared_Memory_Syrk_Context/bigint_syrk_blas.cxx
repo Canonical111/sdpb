@@ -445,6 +445,10 @@ void BigInt_Shared_Memory_Syrk_Context::begin_band_accumulation(
   ASSERT(can_accumulate_bands(output),
          "band accumulation needs a single node and a full-width input window");
   ASSERT_EQUAL(output.Height(), output.Width());
+  // The float accumulator holds a residue exactly only below 2^24.
+  for(const auto prime : comb.primes)
+    ASSERT(prime < (mp_limb_t(1) << 24), "band accumulation: prime ", prime,
+           " >= 2^24 cannot be stored as float");
   const auto ranges
     = split_range({0, output.Height()}, output_window_split_factor);
   const auto window_height

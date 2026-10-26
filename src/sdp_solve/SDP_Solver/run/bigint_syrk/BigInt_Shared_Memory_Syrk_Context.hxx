@@ -198,7 +198,8 @@ private:
     std::vector<Accumulator_Run> runs;
   };
   std::vector<Accumulator_Block> accumulator_blocks;
-  // [prime][element], residues in [0, prime). Primes are < 2^21, so float is exact.
+  // [prime][element], residues in [0, prime). Primes are < 2^21 (capped for
+  // full_width_input, see Bigint_Syrk_Config::comb()), so float is exact.
   std::vector<float> accumulator;
   size_t accumulator_elements = 0;
 
