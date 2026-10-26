@@ -24,7 +24,7 @@ Bigint_Syrk_Config::Bigint_Syrk_Config(
   const El::mpi::Comm &shared_memory_comm, const size_t precision,
   const size_t num_nodes, const std::vector<size_t> &input_height_per_group,
   const size_t input_width, const size_t input_split_factor,
-  const size_t output_split_factor)
+  const size_t output_split_factor, const bool full_width_input)
     : shared_memory_comm(shared_memory_comm),
       precision(precision),
       num_nodes(num_nodes),
@@ -36,7 +36,8 @@ Bigint_Syrk_Config::Bigint_Syrk_Config(
       input_split_factor(input_split_factor),
       output_split_factor(output_split_factor),
       input_window_height_per_group_per_prime(get_input_window_group_heights(
-        input_height_per_group, input_split_factor))
+        input_height_per_group, input_split_factor)),
+      full_width_input(full_width_input)
 {}
 Fmpz_Comb Bigint_Syrk_Config::comb() const
 {
@@ -60,13 +61,17 @@ size_t Bigint_Syrk_Config::window_width() const
 {
   return div_ceil(output_dim, output_split_factor);
 }
+size_t Bigint_Syrk_Config::input_window_width() const
+{
+  return full_width_input ? input_width : window_width();
+}
 size_t Bigint_Syrk_Config::input_window_size() const
 {
-  return input_window_height() * window_width() * num_primes();
+  return input_window_height() * input_window_width() * num_primes();
 }
 size_t Bigint_Syrk_Config::num_input_windows() const
 {
-  return output_split_factor == 1 ? 1 : 2;
+  return full_width_input || output_split_factor == 1 ? 1 : 2;
 }
 size_t Bigint_Syrk_Config::output_window_size() const
 {

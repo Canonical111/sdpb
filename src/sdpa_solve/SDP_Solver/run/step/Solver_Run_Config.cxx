@@ -159,13 +159,20 @@ namespace Sdpb::Sdpa
                 FUNC_SCOPE(compute_S);
                 if(streaming)
                   {
-                    // One band of rows of P as BigFloat (window height x m),
-                    // the per-band S, and local copies of L_X^{-1}, L_Y.
+                    // One band of rows of P as BigFloat (window height x m), local
+                    // copies of L_X^{-1}, L_Y, and either the accumulated residues of
+                    // S's upper triangle (single node: 4 bytes per element per prime)
+                    // or a per-band S.
                     NAMED_ALLOC(band, "P band (BigFloat)",
                                 syrk_cfg.input_window_height()
                                   * syrk_cfg.input_width
                                   * bigfloat_bytes());
-                    NAMED_ALLOC(S_band, "S_band", sizes.S_bytes);
+                    const size_t m = syrk_cfg.output_dim;
+                    if(syrk_cfg.full_width_input)
+                      NAMED_ALLOC(S_residues, "S residues (accumulated)",
+                                  m * (m + 1) / 2 * syrk_cfg.num_primes() * 4);
+                    else
+                      NAMED_ALLOC(S_band, "S_band", sizes.S_bytes);
                     NAMED_ALLOC(L_copies, "L_X_inv, L_Y", 2 * sizes.X_bytes);
                     TEMP_ALLOC("normalize_and_shift(band)",
                                syrk_cfg.node_normalize_and_shift_P_bytes());
@@ -437,11 +444,21 @@ namespace Sdpb::Sdpa
 
     // #184: streaming S has no trmm to balance against. It needs bands at least as tall
     // as the largest block (one column of G_p per band row group) and prefers them as
-    // tall as possible (fewer per-band S restores). Take the smallest output split that
+    // tall as possible (fewer, longer BLAS calls). Take the smallest output split that
     // admits such bands, then the smallest input split (= tallest bands) that fits.
     std::optional<Solver_Run_Config> streaming_result;
     if(stream_S_enabled())
       {
+        // Primes for stream_S_extra_bits more per factor, and on a single node one
+        // full-width input window for band accumulation (see compute_S_streaming.cxx).
+        const auto create_syrk_cfg
+          = [&](const size_t syrk_input_split_factor,
+                const size_t syrk_output_split_factor) -> Bigint_Syrk_Config {
+          return Bigint_Syrk_Config(
+            comm, precision + stream_S_extra_bits, num_nodes,
+            sizes.P_group_heights, P_width, syrk_input_split_factor,
+            syrk_output_split_factor, num_nodes == 1);
+        };
         const size_t max_dim = *std::max_element(
           block_info.block_dimensions.begin(), block_info.block_dimensions.end());
         for(size_t output_split = 1; output_split <= max_syrk_output_split_factor;

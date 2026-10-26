@@ -5,6 +5,8 @@
 
 #include <cblas.h>
 
+#include <chrono>
+
 namespace
 {
   // output = inputA^T * inputB
@@ -425,4 +427,215 @@ void BigInt_Shared_Memory_Syrk_Context::
     }
 
   output_residues_window->Fence();
+}
+
+// #184: band accumulation (see the header). Q's residues are summed over all bands in a
+// private accumulator instead of being restored band by band.
+
+bool BigInt_Shared_Memory_Syrk_Context::can_accumulate_bands(
+  const El::DistMatrix<El::BigFloat> &output) const
+{
+  return full_width_input
+         && El::mpi::Congruent(shared_memory_comm, output.DistComm());
+}
+
+void BigInt_Shared_Memory_Syrk_Context::begin_band_accumulation(
+  const El::DistMatrix<El::BigFloat> &output)
+{
+  ASSERT(can_accumulate_bands(output),
+         "band accumulation needs a single node and a full-width input window");
+  ASSERT_EQUAL(output.Height(), output.Width());
+  const auto ranges
+    = split_range({0, output.Height()}, output_window_split_factor);
+  const auto window_height
+    = static_cast<size_t>(output_residues_window->height);
+
+  accumulator_blocks.clear();
+  accumulator_elements = 0;
+  for(size_t i = 0; i < ranges.size(); ++i)
+    for(size_t j = i; j < ranges.size(); ++j)
+      {
+        auto &block = accumulator_blocks.emplace_back();
+        block.I = ranges.at(i);
+        block.J = ranges.at(j);
+        // This rank's elements of the upper triangle, column by column.
+        for(El::Int col = block.J.beg; col < block.J.end; ++col)
+          {
+            if(!output.IsLocalCol(col))
+              continue;
+            const El::Int row_end = std::min(block.I.end, col + 1);
+            for(El::Int row = block.I.beg; row < row_end; ++row)
+              {
+                if(!output.IsLocalRow(row))
+                  continue;
+                auto &runs = block.runs;
+                if(!runs.empty() && runs.back().col == col
+                   && runs.back().row_begin + runs.back().length == row)
+                  {
+                    ++runs.back().length;
+                  }
+                else
+                  {
+                    runs.push_back(
+                      {row, col, 1,
+                       static_cast<size_t>(row - block.I.beg)
+                         + static_cast<size_t>(col - block.J.beg)
+                             * window_height,
+                       accumulator_elements});
+                  }
+                ++accumulator_elements;
+              }
+          }
+      }
+  accumulator.assign(accumulator_elements * comb.num_primes, 0.0f);
+  band_accumulation_profile = {};
+}
+
+void BigInt_Shared_Memory_Syrk_Context::reset_band_accumulation()
+{
+  ASSERT(!accumulator_blocks.empty(), "begin_band_accumulation() not called");
+  std::fill(accumulator.begin(), accumulator.end(), 0.0f);
+  band_accumulation_profile = {};
+}
+
+// Zero this rank's parts of the output window (the Q_IJ of its BLAS jobs).
+void BigInt_Shared_Memory_Syrk_Context::clear_output_residues(
+  const Job_Schedule &blas_job_schedule)
+{
+  const auto rank = shared_memory_comm.Rank();
+  for(const auto &job : blas_job_schedule.jobs_by_rank.at(rank))
+    {
+      auto &output_matrix
+        = output_residues_window->residues.at(job.prime_index);
+      El::Matrix<double> submatrix;
+      El::View(submatrix, output_matrix, job.I, job.J);
+      El::Zero(submatrix);
+    }
+  output_residues_window->Fence();
+}
+
+void BigInt_Shared_Memory_Syrk_Context::accumulate_band(
+  const std::vector<El::DistMatrix<El::BigFloat>> &bigint_band_blocks,
+  Timers &timers, El::Matrix<int32_t> &block_timings_ms)
+{
+  Scoped_Timer timer(timers, "accumulate_band");
+  ASSERT(!accumulator_blocks.empty(), "begin_band_accumulation() not called");
+  constexpr auto uplo = El::UPPER;
+  const auto &input = *input_grouped_block_residues_window_A;
+
+  using clock = std::chrono::steady_clock;
+  auto &profile = band_accumulation_profile;
+  const auto seconds_since = [](const clock::time_point &t) {
+    return std::chrono::duration<double>(clock::now() - t).count();
+  };
+
+  // Residues of the whole band, once, into the full-width input window.
+  auto t0 = clock::now();
+  const El::Int width = accumulator_blocks.back().J.end;
+  compute_block_residues(*input_grouped_block_residues_window_A,
+                         bigint_band_blocks, 0, {0, width}, timers,
+                         block_timings_ms);
+  profile.residues += seconds_since(t0);
+
+  const auto rank = shared_memory_comm.Rank();
+  for(const auto &block : accumulator_blocks)
+    {
+      const auto height = block.I.end - block.I.beg;
+      const auto block_width = block.J.end - block.J.beg;
+      const auto kind = block.I == block.J ? Blas_Job::syrk : Blas_Job::gemm;
+      const auto &schedule
+        = get_blas_job_schedule(kind, uplo, height, block_width);
+      t0 = clock::now();
+      {
+        Scoped_Timer clear_timer(timers, "clear_output");
+        clear_output_residues(schedule);
+      }
+      profile.clear += seconds_since(t0);
+      t0 = clock::now();
+      {
+        // As do_blas_job(), with the job's columns offset to the block's place in
+        // the full-width input.
+        Scoped_Timer syrk_timer(timers, "syrk");
+        for(const auto &job : schedule.jobs_by_rank.at(rank))
+          {
+            const auto &residues = input.residues.at(job.prime_index);
+            auto output_matrix = El::View(
+              output_residues_window->residues.at(job.prime_index), job.I,
+              job.J);
+            const El::Range<El::Int> I(block.I.beg + job.I.beg,
+                                       block.I.beg + job.I.end);
+            const El::Range<El::Int> J(block.J.beg + job.J.beg,
+                                       block.J.beg + job.J.end);
+            if(job.kind == Blas_Job::syrk)
+              syrk(uplo, El::LockedView(residues, El::ALL, I), output_matrix);
+            else
+              gemm(El::LockedView(residues, El::ALL, I),
+                   El::LockedView(residues, El::ALL, J), output_matrix);
+          }
+        output_residues_window->Fence();
+      }
+      profile.blas += seconds_since(t0);
+      t0 = clock::now();
+      {
+        // acc := (acc + Q_IJ mod prime) mod prime. Per band, |Q_IJ| <= height * prime^2 / 4,
+        // far below 2^51, so the rounding below is exact.
+        Scoped_Timer reduce_timer(timers, "reduce");
+        constexpr double round_magic = 6755399441055744.0; // 2^52 + 2^51
+        for(size_t prime_index = 0; prime_index < comb.num_primes;
+            ++prime_index)
+          {
+            const double prime = comb.primes.at(prime_index);
+            const double prime_inverse = 1.0 / prime;
+            const double *window
+              = output_residues_window->residues.at(prime_index)
+                  .LockedBuffer();
+            float *acc
+              = accumulator.data() + prime_index * accumulator_elements;
+            for(const auto &run : block.runs)
+              {
+                const double *x = window + run.window_offset;
+                float *a = acc + run.accumulator_offset;
+                for(El::Int k = 0; k < run.length; ++k)
+                  {
+                    const double q
+                      = (x[k] * prime_inverse + round_magic) - round_magic;
+                    double sum = a[k] + (x[k] - q * prime);
+                    sum = sum < 0 ? sum + prime : sum;
+                    sum = sum >= prime ? sum - prime : sum;
+                    a[k] = static_cast<float>(sum);
+                  }
+              }
+          }
+        // Nobody clears the window for the next block before everyone has read it.
+        output_residues_window->Fence();
+      }
+      profile.reduce += seconds_since(t0);
+    }
+}
+
+void BigInt_Shared_Memory_Syrk_Context::restore_band_accumulation(
+  const std::function<void(El::Int, El::Int, const Fmpz_BigInt &)> &callback,
+  Timers &timers)
+{
+  Scoped_Timer timer(timers, "restore_band_accumulation");
+  constexpr int sign = 1; // negative values allowed
+  std::vector<mp_limb_t> residues(comb.num_primes);
+  Fmpz_BigInt value;
+  for(const auto &block : accumulator_blocks)
+    for(const auto &run : block.runs)
+      for(El::Int k = 0; k < run.length; ++k)
+        {
+          const size_t element = run.accumulator_offset + k;
+          for(size_t prime_index = 0; prime_index < comb.num_primes;
+              ++prime_index)
+            residues.at(prime_index) = static_cast<mp_limb_t>(
+              accumulator.at(prime_index * accumulator_elements + element));
+          fmpz_multi_CRT_ui(value.value, residues.data(), comb.comb,
+                            comb.comb_temp, sign);
+          callback(run.row_begin + k, run.col, value);
+        }
+  accumulator_blocks.clear();
+  accumulator.clear();
+  accumulator.shrink_to_fit();
+  accumulator_elements = 0;
 }

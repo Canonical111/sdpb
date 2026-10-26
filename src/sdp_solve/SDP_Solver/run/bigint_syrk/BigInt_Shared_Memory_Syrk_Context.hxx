@@ -81,6 +81,39 @@ public:
     return input_group_height_per_prime();
   }
 
+  // #184: Q summed over many bands that share one integer scaling, restored once.
+  // After each band the output residues are reduced mod their prime and added into a
+  // private accumulator (this rank's elements of the upper triangle of Q, all primes),
+  // so the CRT runs once per accumulation instead of once per band.
+  // Single node, UPPER, full_width_input; every band spans all columns of Q.
+  // Collective: all ranks call begin, then accumulate_band the same number of times,
+  // then restore_band_accumulation.
+  [[nodiscard]] bool
+  can_accumulate_bands(const El::DistMatrix<El::BigFloat> &output) const;
+  // Lays out the accumulator for output's distribution (output's storage is not used
+  // afterwards and may be freed until the restore).
+  void begin_band_accumulation(const El::DistMatrix<El::BigFloat> &output);
+  // Zero the accumulator for another pass over the same bands.
+  void reset_band_accumulation();
+  void accumulate_band(
+    const std::vector<El::DistMatrix<El::BigFloat>> &bigint_band_blocks,
+    Timers &timers, El::Matrix<int32_t> &block_timings_ms);
+  // Calls callback(global row, global column, value) for each element of this rank,
+  // then frees the accumulator.
+  void restore_band_accumulation(
+    const std::function<void(El::Int, El::Int, const Fmpz_BigInt &)> &callback,
+    Timers &timers);
+  // Seconds spent in accumulate_band() since the last begin_band_accumulation().
+  struct Band_Accumulation_Profile
+  {
+    double residues = 0, clear = 0, blas = 0, reduce = 0;
+  } band_accumulation_profile;
+  // Restored values are exact while |Q(i,j)| < 2^(primes_product_bits() - 2).
+  [[nodiscard]] flint_bitcnt_t primes_product_bits() const
+  {
+    return fmpz_bits(comb.primes_product.value);
+  }
+
 private:
   El::mpi::Comm shared_memory_comm;
   // Index of MPI group on a node
@@ -101,6 +134,8 @@ private:
   // (should be same for all ranks)
   size_t input_window_split_factor = 0;
   size_t output_window_split_factor = 0;
+  // #184: window A spans all input columns (band accumulation only).
+  bool full_width_input = false;
   std::unique_ptr<Matrix_Residues_Window<double>> output_residues_window;
   const std::vector<size_t> block_index_local_to_global;
   std::function<Job_Schedule(Blas_Job::Kind kind, El::UpperOrLower uplo,
@@ -142,6 +177,29 @@ private:
   // Global offsets of the output submatrix passed to restore_and_reduce().
   El::Int restore_row_offset = 0;
   El::Int restore_col_offset = 0;
+
+  // Band accumulation state (#184). A run is a contiguous piece of one column of an
+  // output block: rows [row_begin, row_begin + length) of global column col.
+  struct Accumulator_Run
+  {
+    El::Int row_begin;
+    El::Int col;
+    El::Int length;
+    size_t window_offset; // in each prime's output matrix
+    size_t accumulator_offset; // in each prime's slice of the accumulator
+  };
+  struct Accumulator_Block
+  {
+    El::Range<El::Int> I;
+    El::Range<El::Int> J;
+    std::vector<Accumulator_Run> runs;
+  };
+  std::vector<Accumulator_Block> accumulator_blocks;
+  // [prime][element], residues in [0, prime). Primes are < 2^21, so float is exact.
+  std::vector<float> accumulator;
+  size_t accumulator_elements = 0;
+
+  void clear_output_residues(const Job_Schedule &blas_job_schedule);
 
   [[nodiscard]] El::Int input_group_height_per_prime() const;
 };

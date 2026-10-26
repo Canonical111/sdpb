@@ -23,19 +23,24 @@ struct Bigint_Syrk_Config
   const size_t output_split_factor;
 
   const std::vector<size_t> input_window_height_per_group_per_prime;
-  // const size_t input_window_width;
+  // #184: one input window spanning all input columns (instead of one or two windows
+  // of the output window's width). Band accumulation squares every output block
+  // against it, so each band's residues are computed once.
+  const bool full_width_input;
 
   Bigint_Syrk_Config(const El::mpi::Comm &shared_memory_comm,
                      const size_t precision, const size_t num_nodes,
                      const std::vector<size_t> &input_height_per_group,
                      const size_t input_width, const size_t input_split_factor,
-                     const size_t output_split_factor);
+                     const size_t output_split_factor,
+                     bool full_width_input = false);
   [[nodiscard]] Fmpz_Comb comb() const;
   [[nodiscard]] size_t num_primes() const;
 
   [[nodiscard]] size_t input_window_height() const;
-  // Input and output windows have the same width
+  // Width of the output window (and of the input windows, unless full_width_input)
   [[nodiscard]] size_t window_width() const;
+  [[nodiscard]] size_t input_window_width() const;
   [[nodiscard]] size_t input_window_size() const;
   [[nodiscard]] size_t num_input_windows() const;
   [[nodiscard]] size_t output_window_size() const;

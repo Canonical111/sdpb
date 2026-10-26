@@ -23,6 +23,7 @@ BigInt_Shared_Memory_Syrk_Context::BigInt_Shared_Memory_Syrk_Context(
       verbosity(verbosity),
       input_window_split_factor(cfg.input_split_factor),
       output_window_split_factor(cfg.output_split_factor),
+      full_width_input(cfg.full_width_input),
       block_index_local_to_global(block_index_local_to_global),
       create_blas_job_schedule_func(create_job_schedule)
 {
@@ -30,7 +31,7 @@ BigInt_Shared_Memory_Syrk_Context::BigInt_Shared_Memory_Syrk_Context(
   input_grouped_block_residues_window_A
     = std::make_unique<Vertical_Block_Matrix_Residues_Window<double>>(
       shared_memory_comm, comb.num_primes, num_groups,
-      cfg.input_window_height_per_group_per_prime, window_width);
+      cfg.input_window_height_per_group_per_prime, cfg.input_window_width());
   if(cfg.num_input_windows() != 1)
     {
       ASSERT_EQUAL(cfg.num_input_windows(), 2);

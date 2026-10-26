@@ -28,7 +28,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -88,12 +91,95 @@ namespace Sdpb::Sdpa
       return bands;
     }
 
+    void mul_2exp(mpf_ptr x, const long shift)
+    {
+      if(shift >= 0)
+        mpf_mul_2exp(x, x, static_cast<mp_bitcnt_t>(shift));
+      else
+        mpf_div_2exp(x, x, static_cast<mp_bitcnt_t>(-shift));
+    }
+
+    // Exponent e with |x| < 2^e (x != 0).
+    long upper_exponent(mpf_srcptr x)
+    {
+      long e;
+      mpf_get_d_2exp(&e, x);
+      return e;
+    }
+
+    // mantissa := trunc(|x| 2^(64 limbs - exponent)) for |x| < 2^exponent; returns sign(x).
+    int8_t to_fixed(mpf_srcptr x, const long exponent, const size_t limbs,
+                    mp_limb_t *mantissa, mpf_ptr tmp, mpz_ptr z)
+    {
+      std::fill(mantissa, mantissa + limbs, mp_limb_t(0));
+      const int sign = mpf_sgn(x);
+      if(sign == 0)
+        return 0;
+      mpf_set(tmp, x);
+      mul_2exp(tmp, static_cast<long>(64 * limbs) - exponent);
+      mpz_set_f(z, tmp);
+      const size_t size = mpz_size(z);
+      ASSERT(size <= limbs, DEBUG_STRING(size), DEBUG_STRING(limbs));
+      std::copy_n(mpz_limbs_read(z), size, mantissa);
+      return sign > 0 ? 1 : -1;
+    }
+
+    // L_X^{-1} of one block in fixed point, row by row:
+    //   L(i,k) = sign(i,k) * mantissa(i,k) * 2^(exponent(i) - 64 limbs),
+    // with exponent(i) bounding row i (the rows normalization of the default path's trmm).
+    struct Fixed_Lower
+    {
+      El::Int dim = 0;
+      size_t limbs = 0;
+      std::vector<mp_limb_t> mantissas; // (i dim + k) limbs
+      std::vector<int8_t> signs; // i dim + k
+      std::vector<long> exponents; // per row
+
+      Fixed_Lower(const El::Matrix<El::BigFloat> &L, const size_t limbs)
+          : dim(L.Height()),
+            limbs(limbs),
+            mantissas(dim * dim * limbs, 0),
+            signs(dim * dim, 0),
+            exponents(dim, 0)
+      {
+        mpf_t tmp;
+        mpz_t z;
+        mpf_init2(tmp, El::gmp::Precision());
+        mpz_init(z);
+        for(El::Int i = 0; i < dim; ++i)
+          {
+            long exponent = std::numeric_limits<long>::min();
+            for(El::Int k = 0; k <= i; ++k)
+              if(mpf_sgn(L.CRef(i, k).gmp_float.get_mpf_t()) != 0)
+                exponent = std::max(
+                  exponent, upper_exponent(L.CRef(i, k).gmp_float.get_mpf_t()));
+            if(exponent == std::numeric_limits<long>::min())
+              continue;
+            exponents[i] = exponent;
+            for(El::Int k = 0; k <= i; ++k)
+              signs[i * dim + k]
+                = to_fixed(L.CRef(i, k).gmp_float.get_mpf_t(), exponent, limbs,
+                           mantissas.data() + (i * dim + k) * limbs, tmp, z);
+          }
+        mpf_clear(tmp);
+        mpz_clear(z);
+      }
+      [[nodiscard]] const mp_limb_t *mantissa(const El::Int i, const El::Int k) const
+      {
+        return mantissas.data() + (i * dim + k) * limbs;
+      }
+    };
+
     // out(:, p) = vec( Linv (F_p LY[:, j0:j1]) ) for every p, one local block.
     // Linv and LY are lower triangular; their strict upper parts are ignored (they hold
     // stale values from the in-place Cholesky / inverse).
+    // B = F_p LY[:, j0:j1] is formed in BigFloat from the sparse entries. With Linv_fixed,
+    // Linv B is then summed exactly in fixed point (B's columns normalized like the
+    // default path's G) and rounded once per element; without it, in BigFloat.
     void compute_slab(const std::vector<std::vector<Sparse_F_Entry>> &F_block,
                       const std::vector<El::BigFloat> &values,
                       const El::Matrix<El::BigFloat> &Linv,
+                      const Fixed_Lower *Linv_fixed,
                       const El::Matrix<El::BigFloat> &LY, const El::Int j0,
                       const El::Int j1, El::Matrix<El::BigFloat> &out)
     {
@@ -111,6 +197,16 @@ namespace Sdpb::Sdpa
       mpf_t tmp, acc;
       mpf_init2(tmp, prec);
       mpf_init2(acc, prec);
+      mpz_t z;
+      mpz_init(z);
+
+      // Fixed-point scratch: B's columns, and pos/neg sums of 2 limbs + 1 limbs.
+      const size_t limbs = Linv_fixed != nullptr ? Linv_fixed->limbs : 0;
+      const size_t sum_limbs = 2 * limbs + 1;
+      std::vector<mp_limb_t> B_mantissas, product(2 * limbs), pos(sum_limbs),
+        neg(sum_limbs), result(sum_limbs);
+      std::vector<int8_t> B_signs;
+      std::vector<long> B_exponents(width);
 
       for(size_t p = 0; p < F_block.size(); ++p)
         {
@@ -141,33 +237,168 @@ namespace Sdpb::Sdpa
             }
           std::sort(nonzero_rows.begin(), nonzero_rows.end());
 
-          // C := Linv B, written column by column into out(:, p) in vec order.
+          if(Linv_fixed == nullptr)
+            {
+              // C := Linv B, written column by column into out(:, p) in vec order.
+              for(El::Int jj = 0; jj < width; ++jj)
+                {
+                  for(El::Int i = 0; i < dim; ++i)
+                    {
+                      mpf_set_ui(acc, 0);
+                      for(const auto k : nonzero_rows)
+                        {
+                          if(k > i)
+                            break;
+                          mpf_mul(tmp, Linv.CRef(i, k).gmp_float.get_mpf_t(),
+                                  B.CRef(k, jj).gmp_float.get_mpf_t());
+                          mpf_add(acc, acc, tmp);
+                        }
+                      mpf_set(out(i + jj * dim, p).gmp_float.get_mpf_t(), acc);
+                    }
+                }
+              continue;
+            }
+
+          // B's columns in fixed point, over its nonzero rows (index t).
+          const size_t r = nonzero_rows.size();
+          B_mantissas.assign(width * r * limbs, 0);
+          B_signs.assign(width * r, 0);
           for(El::Int jj = 0; jj < width; ++jj)
             {
-              for(El::Int i = 0; i < dim; ++i)
-                {
-                  mpf_set_ui(acc, 0);
-                  for(const auto k : nonzero_rows)
-                    {
-                      if(k > i)
-                        break;
-                      mpf_mul(tmp, Linv.CRef(i, k).gmp_float.get_mpf_t(),
-                              B.CRef(k, jj).gmp_float.get_mpf_t());
-                      mpf_add(acc, acc, tmp);
-                    }
-                  mpf_set(out(i + jj * dim, p).gmp_float.get_mpf_t(), acc);
-                }
+              long exponent = std::numeric_limits<long>::min();
+              for(const auto k : nonzero_rows)
+                if(mpf_sgn(B.CRef(k, jj).gmp_float.get_mpf_t()) != 0)
+                  exponent = std::max(
+                    exponent, upper_exponent(B.CRef(k, jj).gmp_float.get_mpf_t()));
+              if(exponent == std::numeric_limits<long>::min())
+                exponent = 0;
+              B_exponents[jj] = exponent;
+              for(size_t t = 0; t < r; ++t)
+                B_signs[jj * r + t] = to_fixed(
+                  B.CRef(nonzero_rows[t], jj).gmp_float.get_mpf_t(), exponent,
+                  limbs, B_mantissas.data() + (jj * r + t) * limbs, tmp, z);
             }
+
+          // C(i, jj) = 2^(e_i + e_jj - 128 limbs) sum_k L~(i,k) B~(k,jj), exactly.
+          for(El::Int jj = 0; jj < width; ++jj)
+            for(El::Int i = 0; i < dim; ++i)
+              {
+                std::fill(pos.begin(), pos.end(), mp_limb_t(0));
+                std::fill(neg.begin(), neg.end(), mp_limb_t(0));
+                for(size_t t = 0; t < r; ++t)
+                  {
+                    const El::Int k = nonzero_rows[t];
+                    if(k > i)
+                      break;
+                    const int8_t sign_L = Linv_fixed->signs[i * dim + k];
+                    const int8_t sign_B = B_signs[jj * r + t];
+                    if(sign_L == 0 || sign_B == 0)
+                      continue;
+                    mpn_mul_n(product.data(), Linv_fixed->mantissa(i, k),
+                              B_mantissas.data() + (jj * r + t) * limbs, limbs);
+                    auto &sum = sign_L == sign_B ? pos : neg;
+                    sum[2 * limbs]
+                      += mpn_add_n(sum.data(), sum.data(), product.data(), 2 * limbs);
+                  }
+                int sign = 1;
+                if(mpn_cmp(pos.data(), neg.data(), sum_limbs) >= 0)
+                  mpn_sub_n(result.data(), pos.data(), neg.data(), sum_limbs);
+                else
+                  {
+                    mpn_sub_n(result.data(), neg.data(), pos.data(), sum_limbs);
+                    sign = -1;
+                  }
+                mp_size_t size = sum_limbs;
+                while(size > 0 && result[size - 1] == 0)
+                  --size;
+                auto *c = out(i + jj * dim, p).gmp_float.get_mpf_t();
+                if(size == 0)
+                  {
+                    mpf_set_ui(c, 0);
+                    continue;
+                  }
+                mpz_t view;
+                mpf_set_z(c, mpz_roinit_n(view, result.data(), sign * size));
+                mul_2exp(c, Linv_fixed->exponents[i] + B_exponents[jj]
+                              - static_cast<long>(128 * limbs));
+              }
         }
       mpf_clear(tmp);
       mpf_clear(acc);
+      mpz_clear(z);
     }
+
+    // Squared norm of one column of P, summed band by band as d^2 2^(2e) (x = d 2^e)
+    // relative to the largest exponent seen: any range, ~double accuracy.
+    struct Column_Norm
+    {
+      double sum = 0;
+      long exp = std::numeric_limits<long>::min();
+
+      void add(mpf_srcptr x)
+      {
+        long e;
+        const double d = mpf_get_d_2exp(&e, x);
+        if(d == 0)
+          return;
+        if(e > exp)
+          {
+            sum = exp == std::numeric_limits<long>::min()
+                    ? 0
+                    : std::ldexp(sum, static_cast<int>(
+                                        2 * std::max(exp - e, -4096L)));
+            exp = e;
+          }
+        sum += std::ldexp(d * d,
+                          static_cast<int>(2 * std::max(e - exp, -4096L)));
+      }
+    };
+
+    // log2 of the global column norms (-inf for zero columns).
+    std::vector<double> global_log2_norms(std::vector<Column_Norm> &norms)
+    {
+      const size_t m = norms.size();
+      std::vector<El::Int> exps(m);
+      for(size_t p = 0; p < m; ++p)
+        exps[p] = norms[p].sum == 0 ? std::numeric_limits<El::Int>::min()
+                                    : static_cast<El::Int>(norms[p].exp);
+      El::mpi::AllReduce(exps.data(), static_cast<int>(m), El::mpi::MAX,
+                         El::mpi::COMM_WORLD);
+      std::vector<double> sums(m, 0.0);
+      for(size_t p = 0; p < m; ++p)
+        if(norms[p].sum != 0)
+          sums[p] = std::ldexp(
+            norms[p].sum,
+            static_cast<int>(2 * std::max<El::Int>(norms[p].exp - exps[p],
+                                                   -4096)));
+      El::mpi::AllReduce(sums.data(), static_cast<int>(m), El::mpi::SUM,
+                         El::mpi::COMM_WORLD);
+      std::vector<double> result(m);
+      for(size_t p = 0; p < m; ++p)
+        result[p] = sums[p] == 0
+                      ? -std::numeric_limits<double>::infinity()
+                      : static_cast<double>(exps[p]) + 0.5 * std::log2(sums[p]);
+      return result;
+    }
+
+    // E_p = ceil(log2 norm_p): the norm then lies in (2^(E_p-1), 2^E_p].
+    std::vector<El::Int>
+    exponents_from_log2_norms(const std::vector<double> &log2_norms)
+    {
+      std::vector<El::Int> exponents(log2_norms.size(), 0);
+      for(size_t p = 0; p < log2_norms.size(); ++p)
+        if(std::isfinite(log2_norms[p]))
+          exponents[p] = static_cast<El::Int>(std::ceil(log2_norms[p]));
+      return exponents;
+    }
+
   }
 
   void compute_S_streaming(const SDP &sdp, const Block_Info &block_info,
                            const Block_Diagonal_Matrix &X_cholesky,
                            const Block_Diagonal_Matrix &Y_cholesky,
                            BigInt_Shared_Memory_Syrk_Context &syrk_context,
+                           std::vector<El::Int> &column_exponents,
                            El::DistMatrix<El::BigFloat> &S, Timers &timers,
                            El::Matrix<int32_t> &block_timings_ms)
   {
@@ -194,6 +425,15 @@ namespace Sdpb::Sdpa
         LY.at(b) = &Y_cholesky.blocks.at(b).LockedMatrix();
         dims.at(b) = X_block.Height();
       }
+    // Fixed-point rows kernel unless SDPB_STREAM_P_MPF is set (BigFloat, for checks).
+    std::vector<Fixed_Lower> Linv_fixed;
+    if(std::getenv("SDPB_STREAM_P_MPF") == nullptr)
+      {
+        const size_t limbs = (bits + 63) / 64;
+        Linv_fixed.reserve(num_blocks);
+        for(size_t b = 0; b < num_blocks; ++b)
+          Linv_fixed.emplace_back(Linv.at(b), limbs);
+      }
     L_timer.stop();
 
     const auto bands = plan_bands(dims, syrk_context.input_band_height());
@@ -201,7 +441,183 @@ namespace Sdpb::Sdpa
     const auto num_iterations = static_cast<size_t>(El::mpi::AllReduce(
       static_cast<El::Int>(bands.size()), El::mpi::MAX, El::mpi::COMM_WORLD));
 
+    // Rows of P for band t: one matrix per local block (zero height when the block is
+    // not in this band).
+    const auto fill_band = [&](const size_t t, Block_Matrix &band) {
+      band.width = m;
+      band.blocks.clear();
+      band.blocks.reserve(num_blocks);
+      for(size_t b = 0; b < num_blocks; ++b)
+        band.blocks.emplace_back(0, m, X_cholesky.blocks.at(b).Grid());
+      if(t >= bands.size())
+        return;
+      for(const auto &slab : bands.at(t))
+        {
+          const auto b = slab.local_block;
+          auto &block = band.blocks.at(b);
+          block.Resize(dims.at(b) * (slab.col_end - slab.col_begin), m);
+          compute_slab(sdp.sparse_F.entries.at(b), sdp.sparse_F.values,
+                       Linv.at(b),
+                       Linv_fixed.empty() ? nullptr : &Linv_fixed.at(b),
+                       *LY.at(b), slab.col_begin, slab.col_end,
+                       block.Matrix());
+        }
+    };
+
     El::Zero(S);
+    using clock = std::chrono::steady_clock;
+    const bool print_profile = std::getenv("SDPB_STREAM_P_PROFILE") != nullptr;
+
+    if(syrk_context.can_accumulate_bands(S))
+      {
+        // One column scaling for all bands: entry (r, p) enters the syrk as the integer
+        // trunc(P(r,p) 2^(bits + extra - E_p)), so the residues of all bands add up and S
+        // is restored once. E_p is ceil(log2) of the previous iteration's norm of column p;
+        // this iteration's exact norms are summed on the way. The syrk primes cover
+        // 2(bits + extra) bits plus headroom, so the scaling is exact (no overflow, no
+        // fewer bits than the default path's exact normalization) while
+        //   -extra <= log2(norm_p) - E_p <= max_log2_ratio   for every column.
+        // Otherwise the pass is repeated with E from the norms just computed, which
+        // always fit. The first iteration has no prediction and runs a norm-only pass.
+        constexpr int extra = stream_S_extra_bits;
+        const double max_log2_ratio
+          = (static_cast<double>(syrk_context.primes_product_bits()) - 3
+             - 2.0 * (static_cast<double>(bits) + extra))
+            / 2;
+        ASSERT(max_log2_ratio >= 2, "SDPB_STREAM_P: syrk primes leave no headroom",
+               DEBUG_STRING(syrk_context.primes_product_bits()),
+               DEBUG_STRING(bits));
+
+        std::chrono::duration<double> t_rows{0}, t_scale{0}, t_syrk{0},
+          t_restore{0};
+        // S is needed only for the restore: lay out the accumulator for S's
+        // distribution, then free S's storage until then.
+        syrk_context.begin_band_accumulation(S);
+        S.Empty();
+        size_t syrk_passes = 0;
+        // with_syrk = false: norms only.
+        const auto pass = [&](const bool with_syrk) -> std::vector<double> {
+          std::vector<Column_Norm> norms(m);
+          if(with_syrk && ++syrk_passes > 1)
+            syrk_context.reset_band_accumulation();
+          for(size_t t = 0; t < num_iterations; ++t)
+            {
+              Timers band_timers;
+              Block_Matrix band;
+              const auto t0 = clock::now();
+              fill_band(t, band);
+              const auto t1 = clock::now();
+              for(auto &block : band.blocks)
+                {
+                  auto &local = block.Matrix();
+                  for(El::Int jLoc = 0; jLoc < local.Width(); ++jLoc)
+                    {
+                      const El::Int p = block.GlobalCol(jLoc);
+                      const long shift
+                        = static_cast<long>(bits) + extra
+                          - static_cast<long>(with_syrk ? column_exponents[p]
+                                                        : 0);
+                      for(El::Int iLoc = 0; iLoc < local.Height(); ++iLoc)
+                        {
+                          auto *x = local(iLoc, jLoc).gmp_float.get_mpf_t();
+                          norms[p].add(x);
+                          if(with_syrk)
+                            mul_2exp(x, shift);
+                        }
+                    }
+                }
+              const auto t2 = clock::now();
+              if(with_syrk)
+                syrk_context.accumulate_band(band.blocks, band_timers,
+                                             block_timings_ms);
+              t_rows += t1 - t0;
+              t_scale += t2 - t1;
+              t_syrk += clock::now() - t2;
+            }
+          return global_log2_norms(norms);
+        };
+
+        Scoped_Timer bands_timer(timers, "bands");
+        size_t passes = 0;
+        if(column_exponents.size() != m)
+          {
+            column_exponents = exponents_from_log2_norms(pass(false));
+            ++passes;
+          }
+        std::vector<double> log2_norms;
+        double lowest = 0, highest = 0;
+        while(true)
+          {
+            log2_norms = pass(true);
+            ++passes;
+            lowest = std::numeric_limits<double>::infinity();
+            highest = -lowest;
+            for(size_t p = 0; p < m; ++p)
+              if(std::isfinite(log2_norms[p]))
+                {
+                  const double r
+                    = log2_norms[p] - static_cast<double>(column_exponents[p]);
+                  lowest = std::min(lowest, r);
+                  highest = std::max(highest, r);
+                }
+            if(highest <= max_log2_ratio && lowest >= -extra)
+              break;
+            ASSERT(passes < 4, "SDPB_STREAM_P: column scaling does not settle",
+                   DEBUG_STRING(lowest), DEBUG_STRING(highest));
+            column_exponents = exponents_from_log2_norms(log2_norms);
+          }
+
+        // The L copies are no longer needed; free them before the restore.
+        Linv.clear();
+        Linv.shrink_to_fit();
+        Linv_fixed.clear();
+        Linv_fixed.shrink_to_fit();
+        const auto t0 = clock::now();
+        S.Resize(m, m);
+        El::Zero(S);
+        El::BigFloat value;
+        syrk_context.restore_band_accumulation(
+          [&](const El::Int i, const El::Int j, const Fmpz_BigInt &bigint) {
+            bigint.to_BigFloat(value);
+            auto *v = value.gmp_float.get_mpf_t();
+            if(i == j && std::isfinite(log2_norms[i]))
+              {
+                // S(i,i) is the squared norm summed above, in units of 2^(2(bits+extra)-2E_i).
+                long e;
+                const double d = mpf_get_d_2exp(&e, v);
+                const double expected
+                  = 2 * (log2_norms[i] - static_cast<double>(column_exponents[i])
+                         + bits + extra);
+                ASSERT(d > 0 && std::abs(std::log2(d) + e - expected) < 1e-6,
+                       "streaming S diagonal disagrees with the column norm",
+                       DEBUG_STRING(i), DEBUG_STRING(e), DEBUG_STRING(expected));
+              }
+            mul_2exp(v, static_cast<long>(column_exponents[i]
+                                          + column_exponents[j])
+                          - 2 * (static_cast<long>(bits) + extra));
+            S.SetLocal(S.LocalRow(i), S.LocalCol(j), value);
+          },
+          timers);
+        t_restore += clock::now() - t0;
+        // Prediction for the next iteration.
+        column_exponents = exponents_from_log2_norms(log2_norms);
+
+        if(print_profile && El::mpi::Rank(El::mpi::COMM_WORLD) == 0)
+          {
+            const auto &sp = syrk_context.band_accumulation_profile;
+            El::Output("S_stream: ", num_iterations, " bands, ", passes,
+                       " passes; rows ", t_rows.count(), " s, scale ",
+                       t_scale.count(), " s, syrk ", t_syrk.count(),
+                       " s (last pass: residues ", sp.residues, ", clear ",
+                       sp.clear, ", blas ", sp.blas, ", reduce ", sp.reduce,
+                       "), restore ", t_restore.count(),
+                       " s; log2(norm/2^E) in [", lowest, ", ", highest, "]");
+          }
+        return;
+      }
+
+    // Fallback (several nodes, or output split > 2): each band is normalized on its own
+    // and restored into S separately.
     // On a single node, band contributions are restored straight into S (no second
     // m x m matrix); across nodes the residues must be reduced first, via S_band.
     const bool single_node = block_info.num_nodes() == 1;
@@ -215,34 +631,15 @@ namespace Sdpb::Sdpa
     // opens dozens per call: with ~100-200 bands per iteration that grew the process by
     // ~2 MB per iteration. Per-band internals therefore go to a scratch Timers, and the
     // phases are accumulated here; set SDPB_STREAM_P_PROFILE to print them.
-    using clock = std::chrono::steady_clock;
     std::chrono::duration<double> t_rows{0}, t_normalize{0}, t_syrk{0};
-    const bool print_profile = std::getenv("SDPB_STREAM_P_PROFILE") != nullptr;
     Scoped_Timer bands_timer(timers, "bands");
 
     for(size_t t = 0; t < num_iterations; ++t)
       {
         Timers band_timers;
-        // One matrix per local block (zero height when the block is not in this band).
         Block_Matrix band;
-        band.width = m;
-        band.blocks.reserve(num_blocks);
-        for(size_t b = 0; b < num_blocks; ++b)
-          band.blocks.emplace_back(0, m, X_cholesky.blocks.at(b).Grid());
         const auto t0 = clock::now();
-        {
-          if(t < bands.size())
-            for(const auto &slab : bands.at(t))
-              {
-                const auto b = slab.local_block;
-                auto &block = band.blocks.at(b);
-                block.Resize(dims.at(b) * (slab.col_end - slab.col_begin), m);
-                compute_slab(sdp.sparse_F.entries.at(b), sdp.sparse_F.values,
-                             Linv.at(b), *LY.at(b), slab.col_begin,
-                             slab.col_end, block.Matrix());
-              }
-        }
-
+        fill_band(t, band);
         const auto t1 = clock::now();
         // Per-band column normalization (global over ranks: all rows of this band
         // enter one syrk accumulation).

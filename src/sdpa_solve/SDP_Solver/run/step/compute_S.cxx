@@ -15,6 +15,7 @@ namespace Sdpb::Sdpa
                            const Block_Diagonal_Matrix &X_cholesky,
                            const Block_Diagonal_Matrix &Y_cholesky,
                            BigInt_Shared_Memory_Syrk_Context &syrk_context,
+                           std::vector<El::Int> &column_exponents,
                            El::DistMatrix<El::BigFloat> &S, Timers &timers,
                            El::Matrix<int32_t> &block_timings_ms);
 
@@ -263,8 +264,9 @@ namespace Sdpb::Sdpa
     if(!compute_S_context.initialize_P_context.has_value())
       {
         compute_S_streaming(sdp, block_info, X_cholesky, Y_cholesky,
-                            compute_S_context.syrk_S_context, S, timers,
-                            block_timings_ms);
+                            compute_S_context.syrk_S_context,
+                            compute_S_context.stream_column_exponents, S,
+                            timers, block_timings_ms);
         return;
       }
     Spilled_P P
