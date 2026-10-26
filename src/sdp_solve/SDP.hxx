@@ -134,6 +134,25 @@ struct SDP
   El::Int free_var_block_height(size_t index) const;
   El::Int free_var_block_width(size_t index) const;
 
+  // sdpb --compressLinvB (lab #170): L^{-1} B keeps only the columns where
+  // B has a nonzero element (a zero column of B stays exactly zero in
+  // L^{-1} B). For each local block: column k of the compressed block is
+  // column free_var_column_maps[block][k] of B, or -1 for a zero padding
+  // column. Each kept column stays on the grid column that holds it in B,
+  // in increasing order there, so that every local operation (Gemv partial
+  // sums, residues) does the arithmetic of the dense matrix.
+  // Empty unless compute_free_var_column_maps() was called.
+  std::vector<std::vector<El::Int>> free_var_column_maps;
+  void compute_free_var_column_maps();
+  // Local block `index` of B restricted to column_map (see above), on B's
+  // grid and alignment.
+  El::DistMatrix<El::BigFloat>
+  free_var_block_columns(size_t index,
+                         const std::vector<El::Int> &column_map) const;
+  // Elements of this rank's part of block `index` of L^{-1} B: dense, or
+  // compressed (with free_var_column_maps).
+  size_t LinvB_block_local_size(size_t index, bool compressed) const;
+
 private:
   void validate(const Block_Info &block_info) const noexcept(false);
 };

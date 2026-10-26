@@ -440,7 +440,8 @@ namespace
   // redistribution buffers.
   void solve_shared(const El::Matrix<El::BigFloat> &L,
                     El::DistMatrix<El::BigFloat> &B,
-                    const Multimodular_Blas_Config &config, Timers &timers)
+                    const Multimodular_Blas_Config &config, Timers &timers,
+                    const El::Int dense_width)
   {
     Multimodular_Blas_Timings timings;
     const int P = B.Height(), N = B.Width();
@@ -477,7 +478,12 @@ namespace
       {
         El::Matrix<El::BigFloat> X;
         X.Attach(P, w, structs, P);
-        multimodular_trsm_left_lower(L, X, config, timings);
+        // The columns this rank would solve in the dense matrix
+        Multimodular_Blas_Config solve_config = config;
+        if(dense_width >= 0)
+          solve_config.decision_width
+            = El::Length(dense_width, rank, grid_size);
+        multimodular_trsm_left_lower(L, X, solve_config, timings);
       }
       for(int jj = 0; jj < w; ++jj)
         for(int i = 0; i < P; ++i)
@@ -502,7 +508,8 @@ namespace
   // its full copy of L.
   void solve_columns(const El::Matrix<El::BigFloat> &L,
                      El::DistMatrix<El::BigFloat> &B,
-                     const Multimodular_Blas_Config &config, Timers &timers)
+                     const Multimodular_Blas_Config &config, Timers &timers,
+                     const El::Int dense_width)
   {
     Scoped_Timer to_columns_timer(timers, "to_columns");
     El::DistMatrix<El::BigFloat, El::STAR, El::VR> B_columns(B);
@@ -510,7 +517,12 @@ namespace
     {
       Scoped_Timer timer(timers, "multimodular");
       Multimodular_Blas_Timings timings;
-      multimodular_trsm_left_lower(L, B_columns.Matrix(), config, timings);
+      Multimodular_Blas_Config solve_config = config;
+      if(dense_width >= 0)
+        solve_config.decision_width = El::Length(
+          dense_width, B_columns.RowShift(), B_columns.RowStride());
+      multimodular_trsm_left_lower(L, B_columns.Matrix(), solve_config,
+                                   timings);
     }
     Scoped_Timer timer(timers, "from_columns");
     B = B_columns;
@@ -576,7 +588,8 @@ void Multimodular_Block_Factor::cholesky(
 }
 
 void Multimodular_Block_Factor::solve(El::DistMatrix<El::BigFloat> &B,
-                                      Timers &timers)
+                                      Timers &timers,
+                                      const El::Int dense_width)
 {
   const El::Matrix<El::BigFloat> &L = storage->L();
   ASSERT_EQUAL(B.Height(), L.Height());
@@ -585,10 +598,12 @@ void Multimodular_Block_Factor::solve(El::DistMatrix<El::BigFloat> &B,
       // In place
       Scoped_Timer timer(timers, "multimodular");
       Multimodular_Blas_Timings timings;
-      multimodular_trsm_left_lower(L, B.Matrix(), config, timings);
+      Multimodular_Blas_Config solve_config = config;
+      solve_config.decision_width = dense_width;
+      multimodular_trsm_left_lower(L, B.Matrix(), solve_config, timings);
     }
   else if(shared())
-    solve_shared(L, B, config, timers);
+    solve_shared(L, B, config, timers, dense_width);
   else
-    solve_columns(L, B, config, timers);
+    solve_columns(L, B, config, timers, dense_width);
 }

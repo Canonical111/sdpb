@@ -184,7 +184,8 @@ void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas(
   El::UpperOrLower uplo,
   const std::vector<El::DistMatrix<El::BigFloat>> &bigint_input_matrix_blocks,
   El::DistMatrix<El::BigFloat> &bigint_output, Timers &timers,
-  El::Matrix<int32_t> &block_timings_ms)
+  El::Matrix<int32_t> &block_timings_ms,
+  const std::vector<std::vector<El::Int>> *column_maps)
 {
   // - Calculate Q = P^T P from all P blocks on the node.
   // - If we have only one node, then it's the global result (=bigint_output).
@@ -200,6 +201,23 @@ void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas(
   const auto output_ranges
     = split_range({0, bigint_output.Height()}, output_window_split_factor);
 
+  // --compressLinvB: global column of P -> column of each block, or -1
+  std::vector<std::vector<El::Int>> column_inverse_maps;
+  if(column_maps != nullptr)
+    {
+      ASSERT_EQUAL(column_maps->size(), bigint_input_matrix_blocks.size());
+      for(const auto &column_map : *column_maps)
+        {
+          auto &inverse = column_inverse_maps.emplace_back(
+            bigint_output.Height(), -1);
+          for(size_t k = 0; k < column_map.size(); ++k)
+            if(column_map[k] >= 0)
+              inverse.at(column_map[k]) = k;
+        }
+    }
+  const auto *inverse_maps
+    = column_maps == nullptr ? nullptr : &column_inverse_maps;
+
   for(size_t i = 0; i < output_window_split_factor; ++i)
     {
       const auto &I = output_ranges.at(i);
@@ -210,7 +228,8 @@ void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas(
           auto bigint_output_submatrix = bigint_output(I, J);
           // Call BLAS to calculate residues for Q(I,J)
           bigint_syrk_blas_shmem_submatrix(uplo, bigint_input_matrix_blocks, I,
-                                           J, timers, block_timings_ms);
+                                           J, timers, block_timings_ms,
+                                           inverse_maps);
           std::optional<El::UpperOrLower> uplo_opt;
           if(I.beg == J.beg)
             uplo_opt = uplo;
@@ -227,7 +246,8 @@ void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas_shmem_submatrix(
   const El::UpperOrLower uplo,
   const std::vector<El::DistMatrix<El::BigFloat>> &bigint_input_matrix_blocks,
   const El::Range<El::Int> &output_I, const El::Range<El::Int> &output_J,
-  Timers &timers, El::Matrix<int32_t> &block_timings_ms)
+  Timers &timers, El::Matrix<int32_t> &block_timings_ms,
+  const std::vector<std::vector<El::Int>> *column_inverse_maps)
 {
   Scoped_Timer timer(timers, "shmem");
 
@@ -272,13 +292,14 @@ void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas_shmem_submatrix(
         const auto skip_rows = iter * input_group_height_per_prime();
         compute_block_residues(*input_grouped_block_residues_window_A,
                                bigint_input_matrix_blocks, skip_rows, output_I,
-                               timers, block_timings_ms);
+                               timers, block_timings_ms, column_inverse_maps);
         if(output_I.beg != output_J.beg)
           {
             ASSERT(output_I.end != output_J.end);
             compute_block_residues(*input_grouped_block_residues_window_B,
                                    bigint_input_matrix_blocks, skip_rows,
-                                   output_J, timers, block_timings_ms);
+                                   output_J, timers, block_timings_ms,
+                                   column_inverse_maps);
           }
         // TODO if input_split_factor == 1, we can reuse
         // same P_I for all P_J

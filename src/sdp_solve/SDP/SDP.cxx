@@ -295,3 +295,126 @@ El::Int SDP::free_var_block_width(const size_t index) const
   return sparse_free_var_matrix ? free_var_matrix_sparse.at(index).width
                                 : free_var_matrix.blocks.at(index).Width();
 }
+
+void SDP::compute_free_var_column_maps()
+{
+  const El::BigFloat zero(0);
+  const size_t num_blocks = free_var_matrix.blocks.size();
+  free_var_column_maps.clear();
+  free_var_column_maps.reserve(num_blocks);
+  for(size_t index = 0; index < num_blocks; ++index)
+    {
+      El::DistMatrix<El::BigFloat> scratch;
+      const auto &B = free_var_block(index, scratch);
+      const El::Int width = B.Width();
+
+      // Nonzero columns, over all ranks of the block's grid
+      std::vector<int> nonzero(width, 0);
+      const auto &local = B.LockedMatrix();
+      for(El::Int jLoc = 0; jLoc < B.LocalWidth(); ++jLoc)
+        for(El::Int iLoc = 0; iLoc < B.LocalHeight(); ++iLoc)
+          if(local.CRef(iLoc, jLoc) != zero)
+            {
+              nonzero.at(B.GlobalCol(jLoc)) = 1;
+              break;
+            }
+      if(width > 0)
+        El::mpi::AllReduce(nonzero.data(), width, El::mpi::MAX,
+                           B.Grid().Comm());
+
+      // Column g of B is owned by grid column (g + RowAlign) % W. The t-th
+      // nonzero column with g % W = r goes to position t * W + r, which
+      // has the same owner. Unused positions are zero padding (-1).
+      const El::Int W = B.RowStride();
+      std::vector<El::Int> count(W, 0);
+      std::vector<El::Int> column_map;
+      for(El::Int g = 0; g < width; ++g)
+        {
+          if(!nonzero[g])
+            continue;
+          const El::Int r = g % W;
+          const El::Int k = count[r]++ * W + r;
+          if(k >= El::Int(column_map.size()))
+            column_map.resize(k + 1, -1);
+          column_map[k] = g;
+        }
+      // El::Trsm solves a single column with Trsv; keep at least two
+      // columns when B has two, so that the algorithm is that of B.
+      if(column_map.size() == 1 && width > 1)
+        column_map.push_back(-1);
+      free_var_column_maps.push_back(std::move(column_map));
+    }
+}
+
+El::DistMatrix<El::BigFloat>
+SDP::free_var_block_columns(const size_t index,
+                            const std::vector<El::Int> &column_map) const
+{
+  const auto &grid = free_var_matrix.blocks.at(index).Grid();
+  El::DistMatrix<El::BigFloat> result(grid);
+  if(sparse_free_var_matrix)
+    {
+      const auto &sparse = free_var_matrix_sparse.at(index);
+      result.AlignCols(sparse.col_align, false);
+      result.AlignRows(sparse.row_align, false);
+    }
+  else
+    {
+      const auto &B = free_var_matrix.blocks.at(index);
+      result.AlignCols(B.ColAlign(), false);
+      result.AlignRows(B.RowAlign(), false);
+    }
+  result.Resize(free_var_block_height(index), column_map.size());
+  El::Zero(result);
+
+  // Same grid and alignments: column k of result and column column_map[k]
+  // of B are on the same rank, at local columns kLoc and jLoc.
+  auto &local = result.Matrix();
+  const El::Int W = result.RowStride(), shift = result.RowShift();
+  for(El::Int kLoc = 0; kLoc < result.LocalWidth(); ++kLoc)
+    {
+      const El::Int g = column_map.at(result.GlobalCol(kLoc));
+      if(g < 0)
+        continue;
+      ASSERT_EQUAL((g - shift) % W, 0, DEBUG_STRING(g), DEBUG_STRING(W));
+      const El::Int jLoc = (g - shift) / W;
+      if(sparse_free_var_matrix)
+        {
+          const auto &sparse = free_var_matrix_sparse.at(index);
+          ASSERT_EQUAL(sparse.local_height, result.LocalHeight());
+          for(size_t e = sparse.col_start.at(jLoc);
+              e < sparse.col_start.at(jLoc + 1); ++e)
+            local.Set(sparse.rows[e], kLoc, sparse.values[e]);
+        }
+      else
+        {
+          const auto &B = free_var_matrix.blocks.at(index);
+          ASSERT_EQUAL(B.LocalHeight(), result.LocalHeight());
+          ASSERT_EQUAL(B.GlobalCol(jLoc), g);
+          for(El::Int iLoc = 0; iLoc < result.LocalHeight(); ++iLoc)
+            local.Set(iLoc, kLoc, B.LockedMatrix().CRef(iLoc, jLoc));
+        }
+    }
+  return result;
+}
+
+size_t SDP::LinvB_block_local_size(const size_t index,
+                                   const bool compressed) const
+{
+  El::DistMatrix<El::BigFloat> shape(free_var_matrix.blocks.at(index).Grid());
+  if(sparse_free_var_matrix)
+    {
+      shape.AlignCols(free_var_matrix_sparse.at(index).col_align, false);
+      shape.AlignRows(free_var_matrix_sparse.at(index).row_align, false);
+    }
+  else
+    {
+      shape.AlignCols(free_var_matrix.blocks.at(index).ColAlign(), false);
+      shape.AlignRows(free_var_matrix.blocks.at(index).RowAlign(), false);
+    }
+  const El::Int width = compressed ? free_var_column_maps.at(index).size()
+                                   : free_var_block_width(index);
+  return El::Length(free_var_block_height(index), shape.ColShift(),
+                    shape.ColStride())
+         * El::Length(width, shape.RowShift(), shape.RowStride());
+}

@@ -35,7 +35,11 @@ public:
   void cholesky(const El::DistMatrix<El::BigFloat> &schur,
                 El::DistMatrix<El::BigFloat> &cholesky, Timers &timers);
   // B := L^{-1} B (B on the same grid as schur)
-  void solve(El::DistMatrix<El::BigFloat> &B, Timers &timers);
+  // dense_width >= 0: B holds some columns of a matrix of this width (the
+  // others are zero; sdpb --compressLinvB). The algorithm is chosen as for
+  // the full matrix, so each column is computed as in its dense solve.
+  void solve(El::DistMatrix<El::BigFloat> &B, Timers &timers,
+             El::Int dense_width = -1);
 
   bool shared() const;
 

@@ -43,6 +43,11 @@ struct Multimodular_Blas_Config
   // columns per rank; recursive is faster for many, e.g. 195 x 1834.)
   bool left_looking = true;
   double left_looking_max_ratio = 2.0;
+  // If >= 0: choose between left-looking and recursive as if B had this
+  // many columns. sdpb --compressLinvB (lab #170) solves for B's nonzero
+  // columns only and passes the dense width, so that every column takes
+  // the same path, with the same arithmetic, as in the dense solve.
+  long decision_width = -1;
   // Left-looking Trsm: headroom of the per-column fixed-point scale of X
   int growth_bits = 32;
   // Left-looking Trsm: memory for the stored residues of X; sets the

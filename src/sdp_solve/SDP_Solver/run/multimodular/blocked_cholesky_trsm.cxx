@@ -54,8 +54,10 @@ void multimodular_trsm_left_lower(const El::Matrix<El::BigFloat> &L,
                                   const Multimodular_Blas_Config &config,
                                   Multimodular_Blas_Timings &timings)
 {
+  const long path_width
+    = config.decision_width >= 0 ? config.decision_width : B.Width();
   if(config.left_looking
-     && B.Width() <= config.left_looking_max_ratio * L.Height())
+     && path_width <= config.left_looking_max_ratio * L.Height())
     {
       multimodular_trsm_left_looking(L, B, config, timings);
       return;

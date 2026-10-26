@@ -45,11 +45,17 @@ public:
   //
   // If you want to square arbitrary BigFloat matrix P,
   // then use Matrix_Normalizer before and after calling this bigint_syrk_blas()
-  void bigint_syrk_blas(El::UpperOrLower uplo,
-                        const std::vector<El::DistMatrix<El::BigFloat>>
-                          &bigint_input_matrix_blocks,
-                        El::DistMatrix<El::BigFloat> &bigint_output,
-                        Timers &timers, El::Matrix<int32_t> &block_timings_ms);
+  //
+  // column_maps (optional, sdpb --compressLinvB): block b holds the columns
+  // (*column_maps)[b] of its band of P (-1: zero padding); the other
+  // columns are zero. Their residues are written as zeros, so the residue
+  // windows, and Q, are those of the dense P.
+  void bigint_syrk_blas(
+    El::UpperOrLower uplo,
+    const std::vector<El::DistMatrix<El::BigFloat>> &bigint_input_matrix_blocks,
+    El::DistMatrix<El::BigFloat> &bigint_output, Timers &timers,
+    El::Matrix<int32_t> &block_timings_ms,
+    const std::vector<std::vector<El::Int>> *column_maps = nullptr);
 
 private:
   El::mpi::Comm shared_memory_comm;
@@ -89,17 +95,21 @@ private:
                         El::Int output_height, El::Int output_width);
 
   void clear_residues(const Blas_Job_Schedule &blas_job_schedule);
+  // column_inverse_maps (optional): for block b, the column of the block
+  // holding global column g of P, or -1 if that column is zero
   void compute_block_residues(
     Block_Residue_Matrices_Window<double> &grouped_block_residues_window,
     const std::vector<El::DistMatrix<El::BigFloat>> &bigint_input_matrix_blocks,
     El::Int skip_rows, El::Range<El::Int> col_range, Timers &timers,
-    El::Matrix<int32_t> &block_timings_ms);
+    El::Matrix<int32_t> &block_timings_ms,
+    const std::vector<std::vector<El::Int>> *column_inverse_maps = nullptr);
 
   void bigint_syrk_blas_shmem_submatrix(
     El::UpperOrLower uplo,
     const std::vector<El::DistMatrix<El::BigFloat>> &bigint_input_matrix_blocks,
     const El::Range<El::Int> &output_I, const El::Range<El::Int> &output_J,
-    Timers &timers, El::Matrix<int32_t> &block_timings_ms);
+    Timers &timers, El::Matrix<int32_t> &block_timings_ms,
+    const std::vector<std::vector<El::Int>> *column_inverse_maps = nullptr);
 
   void
   restore_and_reduce(std::optional<El::UpperOrLower> uplo,

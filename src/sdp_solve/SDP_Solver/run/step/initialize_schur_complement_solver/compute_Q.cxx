@@ -17,6 +17,9 @@ void initialize_schur_off_diagonal(
 {
   schur_off_diagonal.blocks.clear();
   schur_off_diagonal.blocks.reserve(schur_complement_cholesky.blocks.size());
+  // --compressLinvB: only B's nonzero columns, see SDP::free_var_column_maps
+  const bool compressed = !sdp.free_var_column_maps.empty();
+  schur_off_diagonal.column_maps = sdp.free_var_column_maps;
 
   size_t num_blocks_local = schur_complement_cholesky.blocks.size();
   for(size_t block = 0; block < num_blocks_local; ++block)
@@ -60,14 +63,33 @@ void initialize_schur_off_diagonal(
       // schur_off_diagonal = L^{-1} B
       Scoped_Timer solve_timer(timers, "solve_" + block_index_string);
 
-      schur_off_diagonal.blocks.push_back(sdp.free_var_block_copy(block));
-      if(multimodular_factor)
-        multimodular_factor->solve(schur_off_diagonal.blocks[block], timers);
+      if(compressed)
+        schur_off_diagonal.blocks.push_back(sdp.free_var_block_columns(
+          block, sdp.free_var_column_maps.at(block)));
       else
-        El::Trsm(El::LeftOrRightNS::LEFT, El::UpperOrLowerNS::LOWER,
-                 El::OrientationNS::NORMAL, El::UnitOrNonUnitNS::NON_UNIT,
-                 El::BigFloat(1), schur_complement_cholesky.blocks[block],
-                 schur_off_diagonal.blocks[block]);
+        schur_off_diagonal.blocks.push_back(sdp.free_var_block_copy(block));
+      // Compressed: choose the algorithm by the width of B, as El::Trsm and
+      // the multimodular solve would for the dense block. Each column is
+      // then computed as in the dense solve.
+      const El::Int dense_width
+        = compressed ? sdp.free_var_block_width(block) : -1;
+      if(multimodular_factor)
+        multimodular_factor->solve(schur_off_diagonal.blocks[block], timers,
+                                   dense_width);
+      else
+        {
+          auto algorithm = El::TRSM_DEFAULT;
+          if(compressed)
+            algorithm = dense_width > 5 * schur_complement_cholesky.blocks[block]
+                                            .Grid()
+                                            .Size()
+                          ? El::TRSM_LARGE
+                          : El::TRSM_MEDIUM;
+          El::Trsm(El::LeftOrRightNS::LEFT, El::UpperOrLowerNS::LOWER,
+                   El::OrientationNS::NORMAL, El::UnitOrNonUnitNS::NON_UNIT,
+                   El::BigFloat(1), schur_complement_cholesky.blocks[block],
+                   schur_off_diagonal.blocks[block], false, algorithm);
+        }
       block_timings_ms(global_block_index, 0)
         += solve_timer.elapsed_milliseconds();
     }
@@ -122,8 +144,12 @@ void syrk_Q(const Environment &env, Block_Matrix &schur_off_diagonal,
   // Normalize P columns and multiply by 2^N
   int block_width = Q.Width();
   Scoped_Timer normalizer_ctor_timer(timers, "Matrix_Normalizer_ctor");
+  // --compressLinvB: P_blocks hold the columns column_maps of P
+  const auto *column_maps = schur_off_diagonal.column_maps.empty()
+                              ? nullptr
+                              : &schur_off_diagonal.column_maps;
   Matrix_Normalizer normalizer(P_blocks, block_width, El::gmp::Precision(),
-                               El::mpi::COMM_WORLD);
+                               El::mpi::COMM_WORLD, column_maps);
   if(verbosity >= Verbosity::trace)
     {
       print_allocation_message_per_node(
@@ -133,20 +159,20 @@ void syrk_Q(const Environment &env, Block_Matrix &schur_off_diagonal,
   normalizer_ctor_timer.stop();
   {
     Scoped_Timer normalizer_timer(timers, "normalize_P");
-    normalizer.normalize_and_shift_P_blocks(P_blocks);
+    normalizer.normalize_and_shift_P_blocks(P_blocks, column_maps);
   }
 
   // Calculate Q = P^T P
   auto uplo = El::UPPER;
   bigint_syrk_context.bigint_syrk_blas(uplo, P_blocks, Q, timers,
-                                       block_timings_ms);
+                                       block_timings_ms, column_maps);
 
   // Check that Q_ii = 2^2N
   check_normalized_Q_diagonal(Q, normalizer, timers);
 
   // Remove normalization
   Scoped_Timer restore_timer(timers, "restore_P_Q");
-  normalizer.restore_P_blocks(P_blocks);
+  normalizer.restore_P_blocks(P_blocks, column_maps);
   normalizer.restore_Q(uplo, Q);
 }
 

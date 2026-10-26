@@ -22,6 +22,9 @@ struct Solver_Parameters
   // Experimental (lab #164): store the free variable matrix B compactly
   // (nonzero elements only), see sdp_solve/Sparse_Block_Matrix.hxx
   bool sparse_B = false;
+  // Experimental (lab #170): keep only the nonzero columns of B in
+  // L^{-1} B, see SDP::free_var_column_maps
+  bool compress_LinvB = false;
   size_t precision;
 
   El::BigFloat duality_gap_threshold, primal_error_threshold,

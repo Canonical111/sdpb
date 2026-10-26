@@ -71,19 +71,37 @@ namespace
 {
   // For each column:
   // Sum of squares of elements stored in this rank
+  // Column of P held by global column j of a band (identity without a map;
+  // -1 for a padding column)
+  El::Int mapped_col(const std::vector<El::Int> *column_map, const int j)
+  {
+    return column_map == nullptr ? j : column_map->at(j);
+  }
+
   template <class TMatrix>
   void add_local_column_norms_squared(
-    std::vector<El::BigFloat> &local_norms_squared, const TMatrix &matrix)
+    std::vector<El::BigFloat> &local_norms_squared, const TMatrix &matrix,
+    const std::vector<El::Int> *column_map = nullptr)
   {
-    if(local_norms_squared.size() != matrix.Width())
-      El::Output("local_norms_squared.size() != matrix.Width(): ",
-                 local_norms_squared.size(), " ", matrix.Width());
-    ASSERT_EQUAL(local_norms_squared.size(), matrix.Width());
+    if(column_map == nullptr)
+      {
+        if(local_norms_squared.size() != matrix.Width())
+          El::Output("local_norms_squared.size() != matrix.Width(): ",
+                     local_norms_squared.size(), " ", matrix.Width());
+        ASSERT_EQUAL(local_norms_squared.size(), matrix.Width());
+      }
+    else
+      ASSERT_EQUAL(column_map->size(), matrix.Width());
+    // A zero element adds exactly zero, so skipping B's zero columns
+    // leaves every sum bitwise unchanged.
     for(int iLoc = 0; iLoc < local_height(matrix); ++iLoc)
       for(int jLoc = 0; jLoc < local_width(matrix); ++jLoc)
         {
           const auto &value = get_local_cref(matrix, iLoc, jLoc);
-          int j = global_col(matrix, jLoc);
+          const El::Int j
+            = mapped_col(column_map, global_col(matrix, jLoc));
+          if(j < 0)
+            continue;
           local_norms_squared.at(j) += value * value;
         }
   }
@@ -114,7 +132,8 @@ namespace
   template <class TMatrix>
   std::vector<El::BigFloat>
   calculate_column_norms(const std::vector<TMatrix> &input_blocks,
-                         size_t block_width, El::mpi::Comm comm)
+                         size_t block_width, El::mpi::Comm comm,
+                         const std::vector<std::vector<El::Int>> *column_maps)
   {
     // For each column,
     // we calculate norm squared for each block
@@ -123,9 +142,13 @@ namespace
     std::vector<El::BigFloat> local_norms_squared(block_width, 0);
     std::vector<El::BigFloat> column_norms(block_width, 0);
 
-    for(const auto &input_block : input_blocks)
+    if(column_maps != nullptr)
+      ASSERT_EQUAL(column_maps->size(), input_blocks.size());
+    for(size_t b = 0; b < input_blocks.size(); ++b)
       {
-        add_local_column_norms_squared(local_norms_squared, input_block);
+        add_local_column_norms_squared(
+          local_norms_squared, input_blocks[b],
+          column_maps == nullptr ? nullptr : &column_maps->at(b));
       }
 
     El::mpi::AllReduce(local_norms_squared.data(), local_norms_squared.size(),
@@ -157,27 +180,36 @@ template Matrix_Normalizer::Matrix_Normalizer(
 template <class TMatrix>
 Matrix_Normalizer::Matrix_Normalizer(
   const std::vector<TMatrix> &P_matrix_blocks, int P_matrix_width,
-  int precision, El::mpi::Comm comm)
+  int precision, El::mpi::Comm comm,
+  const std::vector<std::vector<El::Int>> *column_maps)
     : precision(precision),
-      column_norms(
-        calculate_column_norms(P_matrix_blocks, P_matrix_width, comm))
+      column_norms(calculate_column_norms(P_matrix_blocks, P_matrix_width,
+                                          comm, column_maps))
 {}
 template Matrix_Normalizer::Matrix_Normalizer(
-  const std::vector<El::Matrix<El::BigFloat>> &, int, int, El::mpi::Comm);
+  const std::vector<El::Matrix<El::BigFloat>> &, int, int, El::mpi::Comm,
+  const std::vector<std::vector<El::Int>> *);
 template Matrix_Normalizer::Matrix_Normalizer(
   const std::vector<El::DistMatrix<El::BigFloat>> &, int, int,
-  El::mpi::Comm comm);
+  El::mpi::Comm comm, const std::vector<std::vector<El::Int>> *);
 
 // normalize_and_shift_P
 
 template <class TMatrix>
-void Matrix_Normalizer::normalize_and_shift_P(TMatrix &P_block)
+void Matrix_Normalizer::normalize_and_shift_P(
+  TMatrix &P_block, const std::vector<El::Int> *column_map)
 {
-  ASSERT_EQUAL(P_block.Width(), column_norms.size());
+  if(column_map == nullptr)
+    ASSERT_EQUAL(P_block.Width(), column_norms.size());
+  else
+    ASSERT_EQUAL(P_block.Width(), column_map->size());
   El::BigFloat normalized_value;
   for(int jLoc = 0; jLoc < local_width(P_block); ++jLoc)
     {
-      int j = global_col(P_block, jLoc);
+      const El::Int j = mapped_col(column_map, global_col(P_block, jLoc));
+      // padding column: zero
+      if(j < 0)
+        continue;
       const auto &norm = column_norms.at(j);
       if(norm == El::BigFloat(0))
         continue;
@@ -189,31 +221,47 @@ void Matrix_Normalizer::normalize_and_shift_P(TMatrix &P_block)
     }
 }
 template void
-Matrix_Normalizer::normalize_and_shift_P(El::Matrix<El::BigFloat> &);
+Matrix_Normalizer::normalize_and_shift_P(El::Matrix<El::BigFloat> &,
+                                         const std::vector<El::Int> *);
 template void
-Matrix_Normalizer::normalize_and_shift_P(El::DistMatrix<El::BigFloat> &);
+Matrix_Normalizer::normalize_and_shift_P(El::DistMatrix<El::BigFloat> &,
+                                         const std::vector<El::Int> *);
 
 template <class TMatrix_Blocks>
 void Matrix_Normalizer::normalize_and_shift_P_blocks(
-  TMatrix_Blocks &P_matrix_blocks)
+  TMatrix_Blocks &P_matrix_blocks,
+  const std::vector<std::vector<El::Int>> *column_maps)
 {
-  for(auto &block : P_matrix_blocks)
-    normalize_and_shift_P(block);
+  if(column_maps != nullptr)
+    ASSERT_EQUAL(column_maps->size(), P_matrix_blocks.size());
+  for(size_t b = 0; b < P_matrix_blocks.size(); ++b)
+    normalize_and_shift_P(P_matrix_blocks[b], column_maps == nullptr
+                                                ? nullptr
+                                                : &column_maps->at(b));
 }
 template void Matrix_Normalizer::normalize_and_shift_P_blocks(
-  std::vector<El::Matrix<El::BigFloat>> &P_matrix_blocks);
+  std::vector<El::Matrix<El::BigFloat>> &P_matrix_blocks,
+  const std::vector<std::vector<El::Int>> *);
 template void Matrix_Normalizer::normalize_and_shift_P_blocks(
-  std::vector<El::DistMatrix<El::BigFloat>> &P_matrix_blocks);
+  std::vector<El::DistMatrix<El::BigFloat>> &P_matrix_blocks,
+  const std::vector<std::vector<El::Int>> *);
 
 // restore P
 
-template <class TMatrix> void Matrix_Normalizer::restore_P(TMatrix &P_block)
+template <class TMatrix>
+void Matrix_Normalizer::restore_P(TMatrix &P_block,
+                                  const std::vector<El::Int> *column_map)
 {
-  ASSERT_EQUAL(P_block.Width(), column_norms.size());
+  if(column_map == nullptr)
+    ASSERT_EQUAL(P_block.Width(), column_norms.size());
+  else
+    ASSERT_EQUAL(P_block.Width(), column_map->size());
   El::BigFloat value;
   for(int jLoc = 0; jLoc < local_width(P_block); ++jLoc)
     {
-      int j = global_col(P_block, jLoc);
+      const El::Int j = mapped_col(column_map, global_col(P_block, jLoc));
+      if(j < 0)
+        continue;
       const auto &norm = column_norms.at(j);
       if(norm == El::BigFloat(0))
         continue;
@@ -225,19 +273,28 @@ template <class TMatrix> void Matrix_Normalizer::restore_P(TMatrix &P_block)
     }
 }
 template void
-Matrix_Normalizer::restore_P(El::DistMatrix<El::BigFloat> &P_block);
-template void Matrix_Normalizer::restore_P(El::Matrix<El::BigFloat> &P_block);
+Matrix_Normalizer::restore_P(El::DistMatrix<El::BigFloat> &P_block,
+                             const std::vector<El::Int> *);
+template void Matrix_Normalizer::restore_P(El::Matrix<El::BigFloat> &P_block,
+                                           const std::vector<El::Int> *);
 
 template <class TMatrix_Blocks>
-void Matrix_Normalizer::restore_P_blocks(TMatrix_Blocks &P_matrix_blocks)
+void Matrix_Normalizer::restore_P_blocks(
+  TMatrix_Blocks &P_matrix_blocks,
+  const std::vector<std::vector<El::Int>> *column_maps)
 {
-  for(auto &block : P_matrix_blocks)
-    restore_P(block);
+  if(column_maps != nullptr)
+    ASSERT_EQUAL(column_maps->size(), P_matrix_blocks.size());
+  for(size_t b = 0; b < P_matrix_blocks.size(); ++b)
+    restore_P(P_matrix_blocks[b],
+              column_maps == nullptr ? nullptr : &column_maps->at(b));
 }
 template void Matrix_Normalizer::restore_P_blocks(
-  std::vector<El::Matrix<El::BigFloat>> &P_matrix_blocks);
+  std::vector<El::Matrix<El::BigFloat>> &P_matrix_blocks,
+  const std::vector<std::vector<El::Int>> *);
 template void Matrix_Normalizer::restore_P_blocks(
-  std::vector<El::DistMatrix<El::BigFloat>> &P_matrix_blocks);
+  std::vector<El::DistMatrix<El::BigFloat>> &P_matrix_blocks,
+  const std::vector<std::vector<El::Int>> *);
 
 // restore_Q
 

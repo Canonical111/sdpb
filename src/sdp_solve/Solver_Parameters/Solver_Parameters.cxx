@@ -40,6 +40,14 @@ boost::program_options::options_description Solver_Parameters::options()
     "elements only. B is expanded block by block where it is used, so the "
     "results are unchanged; saves memory when B has many zeros.");
   result.add_options()(
+    "compressLinvB",
+    boost::program_options::bool_switch(&compress_LinvB)
+      ->default_value(false),
+    "Experimental: store L^{-1} B with only the columns where B has a "
+    "nonzero element (the other columns are exactly zero). The arithmetic "
+    "on the kept columns is unchanged; saves memory and work when B has "
+    "zero columns.");
+  result.add_options()(
     "findPrimalFeasible",
     boost::program_options::bool_switch(&find_primal_feasible)
       ->default_value(false),
@@ -184,6 +192,7 @@ boost::property_tree::ptree to_property_tree(const Solver_Parameters &p)
   result.put("findPrimalFeasible", p.find_primal_feasible);
   result.put("multimodularTrsm", p.multimodular_trsm);
   result.put("sparseB", p.sparse_B);
+  result.put("compressLinvB", p.compress_LinvB);
   result.put("findDualFeasible", p.find_dual_feasible);
   result.put("detectPrimalFeasibleJump", p.detect_primal_feasible_jump);
   result.put("detectDualFeasibleJump", p.detect_dual_feasible_jump);
@@ -214,6 +223,7 @@ std::ostream &operator<<(std::ostream &os, const Solver_Parameters &p)
      << pretty_print_bytes(p.max_shared_memory_bytes, true) << '\n'
      << "multimodularTrsm             = " << p.multimodular_trsm << '\n'
      << "sparseB                      = " << p.sparse_B << '\n'
+     << "compressLinvB                = " << p.compress_LinvB << '\n'
      << "findPrimalFeasible           = " << p.find_primal_feasible << '\n'
      << "findDualFeasible             = " << p.find_dual_feasible << '\n'
      << "detectPrimalFeasibleJump     = " << p.detect_primal_feasible_jump

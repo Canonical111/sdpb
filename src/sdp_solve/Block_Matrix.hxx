@@ -19,6 +19,10 @@
 struct Block_Matrix
 {
   std::vector<El::DistMatrix<El::BigFloat>> blocks;
+  // Optional (sdpb --compressLinvB, lab #170): if not empty, blocks[b] holds
+  // only the columns column_maps[b] (increasing global column indices) of a
+  // matrix whose other columns are exactly zero.
+  std::vector<std::vector<El::Int>> column_maps;
 
   Block_Matrix(const std::vector<size_t> &block_heights, const size_t &width,
                const std::vector<size_t> &block_indices,

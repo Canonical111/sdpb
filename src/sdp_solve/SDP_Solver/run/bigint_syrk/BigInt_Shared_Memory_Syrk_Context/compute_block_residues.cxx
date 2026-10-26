@@ -8,18 +8,48 @@
 
 namespace
 {
+  // Rows of one block of P, as written to the residues window for the
+  // window's column range [col_offset, col_offset + width).
+  // Dense block: matrix is a view of these columns.
+  // Compressed block (sdpb --compressLinvB): matrix is a view of all of the
+  // block's columns, and inverse maps a global column of P to a column of
+  // matrix, or to -1 for a zero column. A zero column is written as zero
+  // residues by the grid column that holds it in the dense layout (the
+  // compressed layout keeps every column on that grid column).
+  struct Block_View
+  {
+    El::DistMatrix<El::BigFloat> matrix;
+    const std::vector<El::Int> *inverse = nullptr;
+    El::Int col_offset = 0;
+
+    El::Int Height() const { return matrix.Height(); }
+    El::Int LocalHeight() const { return matrix.LocalHeight(); }
+    // Column of matrix for window column j, or -1 (zero column)
+    El::Int column(const El::Int j) const
+    {
+      return inverse == nullptr ? j : inverse->at(col_offset + j);
+    }
+    // Whether this rank writes window column j of this block
+    bool IsLocalCol(const El::Int j) const
+    {
+      if(inverse == nullptr)
+        return matrix.IsLocalCol(j);
+      const El::Int k = column(j);
+      if(k >= 0)
+        return matrix.IsLocalCol(k);
+      return matrix.Participating()
+             && (col_offset + j + matrix.RowAlign()) % matrix.RowStride()
+                  == matrix.RowRank();
+    }
+  };
+
   void compute_column_residues_elementwise(
-    const El::DistMatrix<El::BigFloat> &block, size_t group_index,
-    El::Int residue_row_begin, El::Int global_col, Fmpz_Comb &comb,
+    const Block_View &block, size_t group_index, El::Int residue_row_begin,
+    El::Int global_col, Fmpz_Comb &comb,
     Block_Residue_Matrices_Window<double> &block_residues_window)
   {
     if(!block.IsLocalCol(global_col))
       return;
-
-    // Block submatrix for a given row range and a given column
-    const auto block_column_submatrix
-      = block(El::Range(0, block.Height()), global_col);
-    ASSERT(block_column_submatrix.Viewing());
 
     // Residues of blocks on a current MPI group
     // modulo the first prime are written here
@@ -38,6 +68,26 @@ namespace
     auto first_residue_column_submatrix
       = group_residues_matrix(residue_I, residue_J);
     ASSERT(first_residue_column_submatrix.Viewing());
+
+    const El::Int block_col = block.column(global_col);
+    if(block_col < 0)
+      {
+        // Zero column: zero residues for the rows of this rank
+        for(int iLoc = 0; iLoc < block.LocalHeight(); ++iLoc)
+          {
+            const int i = block.matrix.GlobalRow(iLoc);
+            double *data = first_residue_column_submatrix.Buffer(i, 0);
+            for(size_t prime_index = 0; prime_index < comb.num_primes;
+                ++prime_index)
+              data[prime_index * block_residues_window.prime_stride] = 0;
+          }
+        return;
+      }
+
+    // Block submatrix for a given row range and a given column
+    const auto block_column_submatrix
+      = block.matrix(El::Range(0, block.Height()), block_col);
+    ASSERT(block_column_submatrix.Viewing());
 
     Fmpz_BigInt bigint_value;
     // Submatrix is single-column, thus index j is always 0.
@@ -82,14 +132,27 @@ namespace
       int data_offset = 0;
       std::for_each(
         consecutive_blocks_begin, consecutive_blocks_end,
-        [&](const El::DistMatrix<El::BigFloat> &block) {
+        [&](const Block_View &block) {
           // For a given column jLoc, calculate all residues locally and put to column_residues
           ASSERT(block.IsLocalCol(global_col));
           ASSERT_EQUAL(block.LocalHeight(), block.Height());
-          int jLoc = block.LocalCol(global_col);
+          const El::Int block_col = block.column(global_col);
+          if(block_col < 0)
+            {
+              // Zero column
+              for(size_t prime_index = 0; prime_index < comb.num_primes;
+                  ++prime_index)
+                std::fill_n(column_residues_buffer_temp.data()
+                              + prime_index * prime_stride + data_offset,
+                            block.LocalHeight(), 0.0);
+              data_offset += block.LocalHeight();
+              return;
+            }
+          int jLoc = block.matrix.LocalCol(block_col);
           for(int iLoc = 0; iLoc < block.LocalHeight(); ++iLoc)
             {
-              bigint_value.from_BigFloat(block.GetLocalCRef(iLoc, jLoc));
+              bigint_value.from_BigFloat(
+                block.matrix.GetLocalCRef(iLoc, jLoc));
               // pointer to the first residue
               double *data
                 = column_residues_buffer_temp.data() + data_offset + iLoc;
@@ -123,7 +186,7 @@ namespace
 
   void compute_column_residues(
     const size_t group_index,
-    const std::vector<El::DistMatrix<El::BigFloat>> &bigint_input_matrix_blocks,
+    const std::vector<Block_View> &bigint_input_matrix_blocks,
     const El::Int global_col, Fmpz_Comb &comb,
     Block_Residue_Matrices_Window<double> &input_block_residues_window,
     std::vector<double> &column_residues_buffer_temp)
@@ -224,7 +287,8 @@ void BigInt_Shared_Memory_Syrk_Context::compute_block_residues(
   Block_Residue_Matrices_Window<double> &grouped_block_residues_window,
   const std::vector<El::DistMatrix<El::BigFloat>> &bigint_input_matrix_blocks,
   El::Int skip_rows, El::Range<El::Int> col_range, Timers &timers,
-  El::Matrix<int32_t> &block_timings_ms)
+  El::Matrix<int32_t> &block_timings_ms,
+  const std::vector<std::vector<El::Int>> *column_inverse_maps)
 {
   Scoped_Timer compute_residues_timer(timers, "compute_residues");
   {
@@ -237,9 +301,14 @@ void BigInt_Shared_Memory_Syrk_Context::compute_block_residues(
 
     // block_views contains subset of block rows that will be processed
     // in the current step.
-    std::vector<El::DistMatrix<El::BigFloat>> block_views;
-    for(const auto &block : bigint_input_matrix_blocks)
+    if(column_inverse_maps != nullptr)
+      ASSERT_EQUAL(column_inverse_maps->size(),
+                   bigint_input_matrix_blocks.size());
+    std::vector<Block_View> block_views;
+    for(size_t block_index = 0;
+        block_index < bigint_input_matrix_blocks.size(); ++block_index)
       {
+        const auto &block = bigint_input_matrix_blocks[block_index];
         if(target_height == 0)
           break;
         ASSERT(target_height > 0, DEBUG_STRING(target_height));
@@ -254,9 +323,21 @@ void BigInt_Shared_Memory_Syrk_Context::compute_block_residues(
         const int row_end = std::min(height, row_begin + target_height);
 
         auto &block_view = block_views.emplace_back();
-        El::LockedView(block_view, block, El::Range<int>(row_begin, row_end),
-                       col_range);
-        ASSERT(block_view.Viewing());
+        if(column_inverse_maps == nullptr)
+          {
+            El::LockedView(block_view.matrix, block,
+                           El::Range<int>(row_begin, row_end), col_range);
+          }
+        else
+          {
+            // all (compressed) columns
+            El::LockedView(block_view.matrix, block,
+                           El::Range<int>(row_begin, row_end),
+                           El::Range<int>(0, block.Width()));
+            block_view.inverse = &column_inverse_maps->at(block_index);
+            block_view.col_offset = col_range.beg;
+          }
+        ASSERT(block_view.matrix.Viewing());
 
         skip_rows = 0;
         target_height -= row_end - row_begin;
@@ -268,9 +349,9 @@ void BigInt_Shared_Memory_Syrk_Context::compute_block_residues(
         // That would be faster, but it's hardly a bottleneck.
         // So we go with a simple solution for now.
         const auto &grid = bigint_input_matrix_blocks.at(0).Grid();
-        auto &zero_block
-          = block_views.emplace_back(target_height, width, grid);
-        El::Zero(zero_block);
+        auto &zero_block = block_views.emplace_back();
+        zero_block.matrix.SetGrid(grid);
+        El::Zeros(zero_block.matrix, target_height, width);
         target_height = 0;
       }
 

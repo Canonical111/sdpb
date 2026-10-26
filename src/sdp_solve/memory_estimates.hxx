@@ -68,8 +68,16 @@ inline size_t get_schur_complement_size_local(const Block_Info &block_info)
   return schur_complement_size;
 }
 // Dense size of B, as allocated for schur_off_diagonal = L^{-1} B
+// (--compressLinvB: the size of the compressed L^{-1} B)
 inline size_t get_B_size_local(const SDP &sdp)
 {
+  if(!sdp.free_var_column_maps.empty())
+    {
+      size_t LinvB_size = 0;
+      for(size_t block = 0; block < sdp.free_var_column_maps.size(); ++block)
+        LinvB_size += sdp.LinvB_block_local_size(block, true);
+      return LinvB_size;
+    }
   size_t B_size = 0;
   for(const auto &B_block : sdp.free_var_matrix.blocks)
     {

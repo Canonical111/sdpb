@@ -70,6 +70,41 @@ Timers solve(const Block_Info &block_info, const SDPB_Parameters &parameters,
             El::Output("sparseB: per rank nonzeros/dense:", ranks_ss.str());
         }
     }
+  if(parameters.solver.compress_LinvB)
+    {
+      sdp.compute_free_var_column_maps();
+      // Kept elements of L^{-1} B (with padding) of the dense ones
+      size_t counts[2] = {0, 0};
+      for(size_t block = 0; block < sdp.free_var_column_maps.size(); ++block)
+        {
+          counts[0] += sdp.LinvB_block_local_size(block, true);
+          counts[1] += sdp.LinvB_block_local_size(block, false);
+        }
+      std::vector<size_t> per_rank(2 * El::mpi::Size(), 0);
+      per_rank[2 * El::mpi::Rank()] = counts[0];
+      per_rank[2 * El::mpi::Rank() + 1] = counts[1];
+      El::mpi::AllReduce(per_rank.data(), per_rank.size(), El::mpi::SUM,
+                         El::mpi::COMM_WORLD);
+      counts[0] = counts[1] = 0;
+      std::ostringstream ranks_ss;
+      for(int rank = 0; rank < El::mpi::Size(); ++rank)
+        {
+          counts[0] += per_rank[2 * rank];
+          counts[1] += per_rank[2 * rank + 1];
+          ranks_ss << " " << rank << ":" << per_rank[2 * rank] << "/"
+                   << per_rank[2 * rank + 1];
+        }
+      if(El::mpi::Rank() == 0 && parameters.verbosity >= Verbosity::regular)
+        {
+          El::Output("compressLinvB: L^{-1} B keeps ", counts[0],
+                     " elements of ", counts[1], " (",
+                     counts[1] == 0 ? 0.0 : double(counts[0]) / counts[1],
+                     ")");
+          if(parameters.verbosity >= Verbosity::debug)
+            El::Output("compressLinvB: per rank kept/dense:",
+                       ranks_ss.str());
+        }
+    }
   if(parameters.verbosity >= Verbosity::debug)
     {
       print_allocation_message_per_node(env, "SDP", get_allocated_bytes(sdp));
