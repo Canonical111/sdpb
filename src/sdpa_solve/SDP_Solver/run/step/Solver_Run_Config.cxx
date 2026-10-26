@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <optional>
 #include "Solver_Run_Config.hxx"
 
 #include "sdpa_solve/SDP_Solver.hxx"
@@ -434,6 +435,50 @@ namespace Sdpb::Sdpa
       return total_bytes <= max_total_mem && shmem_bytes <= max_shared_mem;
     };
 
+    // #184: streaming S has no trmm to balance against. It needs bands at least as tall
+    // as the largest block (one column of G_p per band row group) and prefers them as
+    // tall as possible (fewer per-band S restores). Take the smallest output split that
+    // admits such bands, then the smallest input split (= tallest bands) that fits.
+    std::optional<Solver_Run_Config> streaming_result;
+    if(stream_S_enabled())
+      {
+        const size_t max_dim = *std::max_element(
+          block_info.block_dimensions.begin(), block_info.block_dimensions.end());
+        for(size_t output_split = 1; output_split <= max_syrk_output_split_factor;
+            ++output_split)
+          {
+            const auto fits = [&](const size_t input_split) {
+              return enough_memory(smallest_init_P_cfg,
+                                   create_syrk_cfg(input_split, output_split));
+            };
+            if(!fits(max_syrk_input_split_factor))
+              continue;
+            size_t input_split = partition_point_unsafe(
+              1, max_syrk_input_split_factor + 1,
+              [&](const size_t split) { return !fits(split); });
+            input_split = El::mpi::AllReduce(input_split, El::mpi::MAX,
+                                             El::mpi::COMM_WORLD);
+            const auto syrk_cfg = create_syrk_cfg(input_split, output_split);
+            const auto &heights
+              = syrk_cfg.input_window_height_per_group_per_prime;
+            size_t min_height
+              = *std::min_element(heights.begin(), heights.end());
+            min_height = El::mpi::AllReduce(min_height, El::mpi::MIN,
+                                            El::mpi::COMM_WORLD);
+            if(min_height >= max_dim)
+              {
+                streaming_result.emplace(sizes, smallest_init_P_cfg, syrk_cfg);
+                break;
+              }
+          }
+        if(!streaming_result.has_value())
+          RUNTIME_ERROR("SDPB_STREAM_P: no syrk configuration within "
+                      "--maxSharedMemory=",
+                      parameters.max_shared_memory,
+                      " holds bands as tall as the largest block (", max_dim,
+                      " rows); raise --maxSharedMemory");
+      }
+
     // Minimal viable output_split_factor(syrk) = 1..primal_dimension.
     // Increasing this split factor hurts performance,
     // so we always give to syrk output window as much memory as we can.
@@ -469,6 +514,8 @@ namespace Sdpb::Sdpa
       });
 
     const auto result = [&]() -> Solver_Run_Config {
+      if(streaming_result.has_value())
+        return *streaming_result;
       // Trmm memory ~ O(1/t), Syrk memory ~ O(1/s),
       // where t = trmm_split_factor, s = syrk_input_split_factor.
       // If we prioritize trmm, then we choose min(t) and max(s).
