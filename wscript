@@ -44,6 +44,7 @@ def build(bld):
                       'src/sdpb_util/bigint_shared_memory/fmpz/Fmpz_Matrix.cxx',
                       'src/sdpb_util/bigint_shared_memory/fmpz/Fmpz_Comb.cxx',
                       'src/sdpb_util/bigint_shared_memory/fmpz/residues.cxx',
+                      'src/sdpb_util/bigint_shared_memory/fmpz/blas_conversions.cxx',
                       'src/sdpb_util/block_mapping/Abstract_Block_Info.cxx',
                       'src/sdpb_util/block_mapping/Block_Mapping.cxx',
                       'src/sdpb_util/Timers/Scoped_Timer.cxx',

@@ -5,6 +5,7 @@
 #include "bigint_trmm/blas_jobs/create_blas_job_schedule.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 #include "sdpb_util/bigint_shared_memory/blas_jobs/Blas_Job_Schedule.hxx"
+#include "sdpb_util/bigint_shared_memory/fmpz/blas_conversions.hxx"
 
 namespace Sdpb::Sdpa
 {
@@ -21,6 +22,12 @@ namespace Sdpb::Sdpa
     // lab (bfss #68): staging for LAB_RESTORE_CONTIGUOUS=1, serialized BigFloats
     // indexed like the elements of one prime in the G residues window.
     std::unique_ptr<Shared_Window_Array<El::byte>> restore_staging;
+    // Node-collective: (re)allocates the staging window if it is too small.
+    El::byte *staging_for(size_t num_elements);
+    // lab (bfss #77): BLAS residues/CRT on the primes of comb (created on
+    // first use)
+    std::unique_ptr<Lab_Blas_Conversions::Context> blas_conversions_context;
+    const Lab_Blas_Conversions::Context &blas_context();
     std::map<std::tuple<size_t, El::VerticalOrHorizontal>,
              Vector_Block_Diagonal_Matrix_Residues_Window<double>>
       G_window_cache{};
@@ -56,6 +63,11 @@ namespace Sdpb::Sdpa
                  Vector_Matrix_Residues_Window<double> &L_window,
                  Vector_Block_Diagonal_Matrix_Residues_Window<double> &G_window,
                  Timers &timers, El::Matrix<int32_t> &block_timings_ms);
+
+    void compute_residues_contiguous(
+      const std::vector<Block_Diagonal_Matrix> &bdms,
+      Vector_Block_Diagonal_Matrix_Residues_Window<double> &window,
+      El::Matrix<int32_t> &block_timings_ms);
 
     void restore_from_residues(
       Vector_Block_Diagonal_Matrix_Residues_Window<double> &bdms_residues,

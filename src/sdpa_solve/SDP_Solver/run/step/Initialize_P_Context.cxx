@@ -2,6 +2,7 @@
 
 #include "bigint_trmm/blas_jobs/create_blas_job_schedule.hxx"
 #include "sdp_solve/Block_Matrix/Block_Diagonal_Matrix.hxx"
+#include "sdpb_util/bigint_shared_memory/fmpz/blas_conversions.hxx"
 #include "sdpb_util/bigint_shared_memory/fmpz/residues.hxx"
 
 #include <cblas.h>
@@ -200,6 +201,64 @@ namespace Sdpb::Sdpa
     }
   }
 
+  namespace
+  {
+    // lab (bfss #68, #77): opt-in conversions, read once per process.
+    bool env_is_1(const char *name)
+    {
+      const char *env = std::getenv(name);
+      return env != nullptr && std::string(env) == "1";
+    }
+    // LAB_BLAS_RESIDUES=1: residues of G by BLAS, in contiguous order
+    bool lab_blas_residues()
+    {
+      static const bool value = env_is_1("LAB_BLAS_RESIDUES");
+      return value;
+    }
+    // LAB_CONTIGUOUS_RESIDUES=1: residues of G by FLINT, in contiguous order
+    bool lab_contiguous_residues()
+    {
+      static const bool value
+        = lab_blas_residues() || env_is_1("LAB_CONTIGUOUS_RESIDUES");
+      return value;
+    }
+    // LAB_BLAS_CRT=1: contiguous restore of G (as LAB_RESTORE_CONTIGUOUS=1)
+    // with the CRT by BLAS
+    bool lab_blas_crt()
+    {
+      static const bool value = env_is_1("LAB_BLAS_CRT");
+      return value;
+    }
+    bool lab_contiguous_restore()
+    {
+      static const bool value
+        = lab_blas_crt() || env_is_1("LAB_RESTORE_CONTIGUOUS");
+      return value;
+    }
+  }
+
+  El::byte *Initialize_P_Context::staging_for(const size_t num_elements)
+  {
+    const size_t bytes = num_elements * El::BigFloat().SerializedSize();
+    if(!restore_staging || restore_staging->size() < bytes)
+      {
+        restore_staging.reset();
+        restore_staging = std::make_unique<Shared_Window_Array<El::byte>>(
+          shared_memory_comm, bytes);
+      }
+    return restore_staging->data();
+  }
+
+  const Lab_Blas_Conversions::Context &Initialize_P_Context::blas_context()
+  {
+    // |trunc(x)| <= 2^precision after normalize_and_shift
+    if(!blas_conversions_context)
+      blas_conversions_context
+        = std::make_unique<Lab_Blas_Conversions::Context>(
+          comb, cfg.precision + 2);
+    return *blas_conversions_context;
+  }
+
   Initialize_P_Context::Initialize_P_Context(const Initialize_P_Config &cfg)
       : cfg(cfg),
         shared_memory_comm(cfg.shared_memory_comm),
@@ -260,6 +319,11 @@ namespace Sdpb::Sdpa
            "vector<Block_Diagonal_Matrix> is longer than allowed by config",
            DEBUG_STRING(bdms.size()),
            DEBUG_STRING(cfg.max_primal_dimension_step()));
+    if(lab_contiguous_residues())
+      {
+        compute_residues_contiguous(bdms, window, block_timings_ms);
+        return;
+      }
     const auto num_blocks = cfg.local_block_locations().size();
     for(size_t vec_index = 0; vec_index < bdms.size(); ++vec_index)
       {
@@ -282,6 +346,122 @@ namespace Sdpb::Sdpa
               += timer.elapsed_milliseconds();
           }
       }
+    window.Fence();
+  }
+
+  void Initialize_P_Context::compute_residues_contiguous(
+    const std::vector<Block_Diagonal_Matrix> &bdms,
+    Vector_Block_Diagonal_Matrix_Residues_Window<double> &window,
+    El::Matrix<int32_t> &block_timings_ms)
+  {
+    // lab (bfss #68, #77): the transpose of the contiguous restore. Owners
+    // serialize their entries into the staging window; then the ranks of a
+    // group compute the residues of contiguous ranges of each block, so that
+    // each rank writes contiguous runs of every prime's residues (instead of
+    // every r-th double of lines that the other ranks of its grid also
+    // write). With LAB_BLAS_RESIDUES=1 the residues are computed by BLAS in
+    // batches (blas_conversions.hxx); they are the same doubles.
+    const size_t value_size = El::BigFloat().SerializedSize();
+    El::byte *staging = staging_for(window.prime_stride);
+    const double *base = window.data(0);
+    const auto num_blocks = cfg.local_block_locations().size();
+    for(size_t vec_index = 0; vec_index < bdms.size(); ++vec_index)
+      {
+        const auto &bdm = bdms.at(vec_index);
+        ASSERT_EQUAL(bdm.blocks.size(), num_blocks);
+        for(size_t block = 0; block < num_blocks; ++block)
+          {
+            const auto &loc = cfg.local_block_locations().at(block);
+            const auto &matrix = bdm.blocks.at(block);
+            const auto first_residue_matrix
+              = window.get_matrix_view(0, loc.block_index_node, vec_index);
+            Timer timer;
+            for(int jLoc = 0; jLoc < matrix.LocalWidth(); ++jLoc)
+              {
+                const int j = matrix.GlobalCol(jLoc);
+                for(int iLoc = 0; iLoc < matrix.LocalHeight(); ++iLoc)
+                  {
+                    const int i = matrix.GlobalRow(iLoc);
+                    const double *first_residue
+                      = first_residue_matrix.LockedBuffer(i, j);
+                    matrix.GetLocalCRef(iLoc, jLoc).Serialize(
+                      staging + (first_residue - base) * value_size);
+                  }
+              }
+            block_timings_ms(loc.block_index_global, 0)
+              += timer.elapsed_milliseconds();
+          }
+      }
+    restore_staging->Fence();
+
+    const bool blas = lab_blas_residues();
+    constexpr size_t batch = Lab_Blas_Conversions::batch_size;
+    std::unique_ptr<Lab_Blas_Conversions::Workspace> work;
+    if(blas)
+      work = std::make_unique<Lab_Blas_Conversions::Workspace>(blas_context());
+    std::vector<El::BigFloat> values(blas ? batch : 1);
+    std::vector<const El::BigFloat *> value_ptrs(batch);
+    std::vector<double *> out_ptrs(batch);
+    Fmpz_BigInt bigint_value;
+    for(size_t vec_index = 0; vec_index < bdms.size(); ++vec_index)
+      {
+        const auto &bdm = bdms.at(vec_index);
+        for(size_t block = 0; block < num_blocks; ++block)
+          {
+            const auto &loc = cfg.local_block_locations().at(block);
+            const auto &matrix = bdm.blocks.at(block);
+            auto first_residue_matrix
+              = window.get_matrix_view(0, loc.block_index_node, vec_index);
+            const size_t height = first_residue_matrix.Height();
+            const size_t width = first_residue_matrix.Width();
+            ASSERT_EQUAL(height, matrix.Height());
+            ASSERT_EQUAL(width, matrix.Width());
+            const size_t group_size = matrix.DistComm().Size();
+            const size_t group_rank = matrix.DistComm().Rank();
+            const size_t n = height * width;
+            const size_t k_begin = n * group_rank / group_size;
+            const size_t k_end = n * (group_rank + 1) / group_size;
+            Timer timer;
+            if(blas)
+              {
+                for(size_t k0 = k_begin; k0 < k_end; k0 += batch)
+                  {
+                    const size_t nb = std::min(batch, k_end - k0);
+                    for(size_t e = 0; e < nb; ++e)
+                      {
+                        const size_t k = k0 + e;
+                        double *first_residue
+                          = first_residue_matrix.Buffer(k % height, k / height);
+                        values[e].Deserialize(
+                          staging + (first_residue - base) * value_size);
+                        value_ptrs[e] = &values[e];
+                        out_ptrs[e] = first_residue;
+                      }
+                    Lab_Blas_Conversions::compute_residues(
+                      *blas_conversions_context, nb, value_ptrs.data(),
+                      out_ptrs.data(), window.prime_stride, *work);
+                  }
+              }
+            else
+              {
+                El::BigFloat &value = values.at(0);
+                for(size_t k = k_begin; k < k_end; ++k)
+                  {
+                    double *first_residue
+                      = first_residue_matrix.Buffer(k % height, k / height);
+                    value.Deserialize(staging
+                                      + (first_residue - base) * value_size);
+                    bigint_value.from_BigFloat(value);
+                    bigint_to_residues(bigint_value, comb, first_residue,
+                                       window.prime_stride);
+                  }
+              }
+            block_timings_ms(loc.block_index_global, 0)
+              += timer.elapsed_milliseconds();
+          }
+      }
+    // Orders the reads of staging before its next reuse.
+    restore_staging->Fence();
     window.Fence();
   }
 
@@ -359,28 +539,27 @@ namespace Sdpb::Sdpa
     // or not) into a node-shared staging window of serialized BigFloats,
     // and then each rank copies its own entries from there. Same arithmetic
     // per entry, so the same values.
-    static const bool contiguous = [] {
-      const char *env = std::getenv("LAB_RESTORE_CONTIGUOUS");
-      return env != nullptr && std::string(env) == "1";
-    }();
-    if(contiguous)
+    // lab (bfss #77): LAB_BLAS_CRT=1 does the same with the CRT by BLAS in
+    // batches (blas_conversions.hxx); it gives the same BigFloats.
+    if(lab_contiguous_restore())
       {
         const size_t value_size = El::BigFloat().SerializedSize();
-        const size_t num_elements = bdms_residues.prime_stride;
-        if(!restore_staging
-           || restore_staging->size() < num_elements * value_size)
-          {
-            restore_staging.reset();
-            restore_staging = std::make_unique<Shared_Window_Array<El::byte>>(
-              shared_memory_comm, num_elements * value_size);
-          }
-        El::byte *staging = restore_staging->data();
+        El::byte *staging = staging_for(bdms_residues.prime_stride);
         const double *base = bdms_residues.data(0);
         {
           Scoped_Timer restore_timer(timers, "contiguous");
           std::vector<mp_limb_t> residues_buffer_temp;
           Fmpz_BigInt bigint_temp;
           El::BigFloat value;
+          const bool blas = lab_blas_crt();
+          constexpr size_t batch = Lab_Blas_Conversions::batch_size;
+          std::unique_ptr<Lab_Blas_Conversions::Workspace> work;
+          if(blas)
+            work = std::make_unique<Lab_Blas_Conversions::Workspace>(
+              blas_context());
+          std::vector<El::BigFloat> values(blas ? batch : 0);
+          std::vector<El::BigFloat *> value_ptrs(batch);
+          std::vector<const double *> in_ptrs(batch);
           for(size_t vec_index = 0; vec_index < bdms.size(); vec_index++)
             {
               auto &bdm = bdms.at(vec_index);
@@ -400,6 +579,28 @@ namespace Sdpb::Sdpa
                   const size_t k_begin = n * group_rank / group_size;
                   const size_t k_end = n * (group_rank + 1) / group_size;
                   Timer block_timer;
+                  if(blas)
+                    {
+                      for(size_t k0 = k_begin; k0 < k_end; k0 += batch)
+                        {
+                          const size_t nb = std::min(batch, k_end - k0);
+                          for(size_t e = 0; e < nb; ++e)
+                            {
+                              const size_t k = k0 + e;
+                              in_ptrs[e] = first_residue_matrix.LockedBuffer(
+                                k % height, k / height);
+                              value_ptrs[e] = &values[e];
+                            }
+                          Lab_Blas_Conversions::restore(
+                            *blas_conversions_context, nb, in_ptrs.data(),
+                            bdms_residues.prime_stride, value_ptrs.data(),
+                            *work);
+                          for(size_t e = 0; e < nb; ++e)
+                            values[e].Serialize(
+                              staging + (in_ptrs[e] - base) * value_size);
+                        }
+                    }
+                  else
                   for(size_t k = k_begin; k < k_end; ++k)
                     {
                       const double *first_residue
