@@ -335,7 +335,11 @@ void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas_from_bands(
           std::optional<El::UpperOrLower> uplo_opt;
           if(I.beg == J.beg)
             uplo_opt = uplo;
+          restore_row_offset = I.beg;
+          restore_col_offset = J.beg;
           restore_and_reduce(uplo_opt, bigint_output_submatrix, timers);
+          restore_row_offset = 0;
+          restore_col_offset = 0;
         }
     }
 }

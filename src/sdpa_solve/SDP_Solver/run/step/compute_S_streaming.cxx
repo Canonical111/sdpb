@@ -178,7 +178,8 @@ namespace Sdpb::Sdpa
 
     // Local copies of L_X^{-1} and L_Y (small: sum(dim^2) each).
     Scoped_Timer L_timer(timers, "L");
-    std::vector<El::Matrix<El::BigFloat>> Linv(num_blocks), LY(num_blocks);
+    std::vector<El::Matrix<El::BigFloat>> Linv(num_blocks);
+    std::vector<const El::Matrix<El::BigFloat> *> LY(num_blocks);
     std::vector<El::Int> dims(num_blocks);
     for(size_t b = 0; b < num_blocks; ++b)
       {
@@ -189,7 +190,7 @@ namespace Sdpb::Sdpa
                X_block.Grid().Size(), " ranks");
         Linv.at(b) = X_block.LockedMatrix();
         El::TriangularInverse(El::LOWER, El::NON_UNIT, Linv.at(b));
-        LY.at(b) = Y_cholesky.blocks.at(b).LockedMatrix();
+        LY.at(b) = &Y_cholesky.blocks.at(b).LockedMatrix();
         dims.at(b) = X_block.Height();
       }
     L_timer.stop();
@@ -200,7 +201,14 @@ namespace Sdpb::Sdpa
       static_cast<El::Int>(bands.size()), El::mpi::MAX, El::mpi::COMM_WORLD));
 
     El::Zero(S);
-    El::DistMatrix<El::BigFloat> S_band(S.Height(), S.Width(), S.Grid());
+    // On a single node, band contributions are restored straight into S (no second
+    // m x m matrix); across nodes the residues must be reduced first, via S_band.
+    const bool single_node = block_info.num_nodes() == 1;
+    El::DistMatrix<El::BigFloat> S_band(S.Grid());
+    if(!single_node)
+      S_band.Resize(S.Height(), S.Width());
+    const El::BigFloat one(1);
+    const El::BigFloat eps = one >> static_cast<int>(bits / 2);
 
     for(size_t t = 0; t < num_iterations; ++t)
       {
@@ -220,7 +228,7 @@ namespace Sdpb::Sdpa
                 auto &block = band.blocks.at(b);
                 block.Resize(dims.at(b) * (slab.col_end - slab.col_begin), m);
                 compute_slab(sdp.sparse_F.entries.at(b), sdp.sparse_F.values,
-                             Linv.at(b), LY.at(b), slab.col_begin,
+                             Linv.at(b), *LY.at(b), slab.col_begin,
                              slab.col_end, block.Matrix());
               }
         }
@@ -245,20 +253,47 @@ namespace Sdpb::Sdpa
                                  col_range);
                 }
             };
-        El::Zero(S_band);
-        syrk_context.bigint_syrk_blas_from_bands(uplo, provider, S_band, timers,
-                                                 block_timings_ms, 1);
-
-        Scoped_Timer accumulate_timer(timers, "restore_accumulate");
-        restore_syrk_output(uplo, normalizer, S_band);
-        for(El::Int jLoc = 0; jLoc < S.LocalWidth(); ++jLoc)
+        if(single_node)
           {
-            const El::Int j = S.GlobalCol(jLoc);
-            for(El::Int iLoc = 0; iLoc < S.LocalHeight(); ++iLoc)
+            // S(i,j) += (S~(i,j) / 2^(2 bits)) * norm_i * norm_j, with the same
+            // sanity checks as restore_syrk_output().
+            const auto &norms = normalizer.norms;
+            El::BigFloat value;
+            syrk_context.restore_callback = [&](const El::Int i, const El::Int j,
+                                                const Fmpz_BigInt &bigint) {
+              bigint.to_BigFloat(value);
+              value >>= static_cast<int>(2 * bits);
+              ASSERT(El::Abs(value) <= one + eps,
+                     "normalized band contribution out of range: ",
+                     DEBUG_STRING(i), DEBUG_STRING(j), DEBUG_STRING(value));
+              if(i == j)
+                ASSERT((norms.at(i) == El::BigFloat(0) && value == El::BigFloat(0))
+                         || El::Abs(value - one) <= eps,
+                       "normalized band diagonal is not 0 or 1: ",
+                       DEBUG_STRING(i), DEBUG_STRING(value));
+              value *= norms.at(i) * norms.at(j);
+              S.UpdateLocal(S.LocalRow(i), S.LocalCol(j), value);
+            };
+            syrk_context.bigint_syrk_blas_from_bands(uplo, provider, S, timers,
+                                                     block_timings_ms, 1);
+            syrk_context.restore_callback = nullptr;
+          }
+        else
+          {
+            El::Zero(S_band);
+            syrk_context.bigint_syrk_blas_from_bands(
+              uplo, provider, S_band, timers, block_timings_ms, 1);
+            Scoped_Timer accumulate_timer(timers, "restore_accumulate");
+            restore_syrk_output(uplo, normalizer, S_band);
+            for(El::Int jLoc = 0; jLoc < S.LocalWidth(); ++jLoc)
               {
-                if(S.GlobalRow(iLoc) > j)
-                  continue;
-                S.UpdateLocal(iLoc, jLoc, S_band.GetLocalCRef(iLoc, jLoc));
+                const El::Int j = S.GlobalCol(jLoc);
+                for(El::Int iLoc = 0; iLoc < S.LocalHeight(); ++iLoc)
+                  {
+                    if(S.GlobalRow(iLoc) > j)
+                      continue;
+                    S.UpdateLocal(iLoc, jLoc, S_band.GetLocalCRef(iLoc, jLoc));
+                  }
               }
           }
       }

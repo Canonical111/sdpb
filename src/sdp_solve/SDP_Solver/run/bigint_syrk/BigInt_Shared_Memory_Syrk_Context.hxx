@@ -2,6 +2,7 @@
 
 #include "Bigint_Syrk_Config.hxx"
 #include "blas_jobs/create_blas_job_schedule.hxx"
+#include "sdpb_util/bigint_shared_memory/fmpz/Fmpz_BigInt.hxx"
 #include "sdpb_util/bigint_shared_memory/fmpz/Fmpz_Comb.hxx"
 #include "sdpb_util/bigint_shared_memory/Vertical_Block_Matrix_Residues_Window.hxx"
 #include "sdpb_util/bigint_shared_memory/Matrix_Residues_Window.hxx"
@@ -68,6 +69,12 @@ public:
                                    std::optional<size_t> input_iterations
                                    = std::nullopt);
 
+  // #184: when set (single node only), restore_and_reduce() hands each restored element
+  // (global row, global column, value) to this callback instead of writing it into the
+  // output matrix -- streaming S adds band contributions into S without a second m x m
+  // matrix. The callback must be cleared after use.
+  std::function<void(El::Int, El::Int, const Fmpz_BigInt &)> restore_callback;
+
   // Rows per band that one input-window fill holds for this rank's MPI group.
   [[nodiscard]] El::Int input_band_height() const
   {
@@ -132,6 +139,9 @@ private:
   void
   restore_and_reduce(std::optional<El::UpperOrLower> uplo,
                      El::DistMatrix<El::BigFloat> &output, Timers &timers);
+  // Global offsets of the output submatrix passed to restore_and_reduce().
+  El::Int restore_row_offset = 0;
+  El::Int restore_col_offset = 0;
 
   [[nodiscard]] El::Int input_group_height_per_prime() const;
 };

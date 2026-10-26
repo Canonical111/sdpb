@@ -74,6 +74,27 @@ void BigInt_Shared_Memory_Syrk_Context::restore_and_reduce(
   Fmpz_BigInt bigint_value;
   std::vector<mp_limb_t> residues_buffer_temp(comb.num_primes);
 
+  const bool single_node = El::mpi::Congruent(shared_memory_comm, output_comm);
+  if(restore_callback)
+    {
+      ASSERT(single_node,
+             "restore_callback is only supported on a single node");
+      Scoped_Timer local_restore_timer(timers, "local_restore");
+      for(int i = 0; i < height; ++i)
+        for(int j = 0; j < width; ++j)
+          {
+            if(skip_element(i, j) || !output.IsLocal(i, j))
+              continue;
+            restore_bigint_from_residues(*output_residues_window, i, j, comb,
+                                         residues_buffer_temp, bigint_value);
+            restore_callback(restore_row_offset + i, restore_col_offset + j,
+                             bigint_value);
+          }
+      Scoped_Timer fence_timer(timers, "fence");
+      output_residues_window->Fence();
+      return;
+    }
+
   {
     Scoped_Timer local_restore_timer(timers, "local_restore");
     for(int i = 0; i < height; ++i)
