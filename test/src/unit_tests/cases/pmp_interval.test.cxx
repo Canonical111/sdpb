@@ -331,6 +331,30 @@ TEST_CASE("pmp_interval")
       make_scaled(std::vector<El::BigFloat>{1, 1, -1, 1, 1}, std::nullopt));
     REQUIRE_THROWS(
       make_scaled(std::vector<El::BigFloat>{1, 1, 0, 1, 1}, std::nullopt));
+
+    // User bases for degree 4: bilinearBasis_0 of degree <= 2 (weight 1),
+    // bilinearBasis_1 of degree <= 1 (weight (x - 1/2)(2 - x))
+    const auto make_based = [&](const Polynomial_Vector &basis_0,
+                                const Polynomial_Vector &basis_1) {
+      return Polynomial_Vector_Matrix(
+        polys, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt,
+        std::array<Polynomial_Vector, 2>{basis_0, basis_1}, domain);
+    };
+    const Polynomial_Vector basis_1{polynomial({1}), polynomial({0, 1})};
+    // trailing zero coefficients don't count
+    REQUIRE(!make_based({polynomial({1}), polynomial({0, 1}),
+                         polynomial({0, 0, 1, 0})},
+                        basis_1)
+               .has_default_interval_basis());
+    // a degree-3 polynomial in bilinearBasis_0: w q q^T of degree 6 > 4
+    REQUIRE_THROWS(make_based(
+      {polynomial({1}), polynomial({0, 1}), polynomial({0, 0, 0, 1})},
+      basis_1));
+    // a degree-2 polynomial in bilinearBasis_1
+    REQUIRE_THROWS(make_based(
+      {polynomial({1}), polynomial({0, 1}), polynomial({0, 0, 1})},
+      {polynomial({1}), polynomial({0, 0, 1})}));
   }
 
   SECTION("Prefactor pole just above b")

@@ -351,6 +351,25 @@ void Polynomial_Vector_Matrix::validate(const int64_t num_points) const
           ASSERT_EQUAL(bilinear_basis[1].size(), delta2 + 1,
                        DEBUG_STRING(degree));
         }
+      // w_i q q^T must have degree <= D for the D+1 sampled equations to be
+      // the polynomial identity: q in bilinearBasis_i of degree <= delta_i.
+      // (A basis that doesn't span only makes the constraint stronger.)
+      if(domain.is_interval())
+        for(const size_t parity : {0, 1})
+          for(const auto &q : bilinear_basis[parity])
+            {
+              int64_t q_degree = q.degree();
+              while(q_degree > 0
+                    && q.coefficients.at(q_degree) == El::BigFloat(0))
+                --q_degree;
+              ASSERT(q_degree < static_cast<int64_t>(
+                       bilinear_basis[parity].size()),
+                     "bilinearBasis_", parity,
+                     " polynomials must have degree at most ",
+                     bilinear_basis[parity].size() - 1,
+                     " on an interval domain", DEBUG_STRING(q_degree),
+                     DEBUG_STRING(degree));
+            }
     }
 
   ASSERT_EQUAL(polynomials.Height(), polynomials.Width());

@@ -123,7 +123,8 @@
                             "items": {
                                 "type": "string"
                             }
-                        },
+                        }
+                    },
                     "bilinearBasis_0": {
                         "type": "array",
                         "items": {
@@ -131,7 +132,8 @@
                             "items": {
                                 "type": "string"
                             }
-                        },
+                        }
+                    },
                     "bilinearBasis_1": {
                         "type": "array",
                         "items": {
