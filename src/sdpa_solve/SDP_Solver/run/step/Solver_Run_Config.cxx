@@ -2,6 +2,7 @@
 #include "Solver_Run_Config.hxx"
 
 #include "sdpa_solve/SDP_Solver.hxx"
+#include "Compute_S_Context.hxx"
 #include "sdpa_solve/memory_estimates.hxx"
 #include "sdpb_util/Memory_Tracker.hxx"
 #include "sdpb_util/ostream/pretty_print_bytes.hxx"
@@ -126,13 +127,16 @@ namespace Sdpb::Sdpa
             NAMED_GROUP(shmem, "Shared memory windows",
                         [&](const size_t peak) { sdpb_shmem_bytes = peak; });
             // initialize_P() windows
+            // #184: the streaming path (SDPB_STREAM_P) allocates no trmm windows.
+            const bool streaming = stream_S_enabled();
             NAMED_GROUP_ITEM(shmem, shmem_initialize_P,
                              "initialize_P() windows", 0);
             GROUP_ITEM(shmem_initialize_P, L_X_inv_window,
-                       p_cfg.L_X_inv_window_bytes());
+                       streaming ? 0 : p_cfg.L_X_inv_window_bytes());
             GROUP_ITEM(shmem_initialize_P, L_Y_window,
-                       p_cfg.L_Y_window_bytes());
-            GROUP_ITEM(shmem_initialize_P, G_window, p_cfg.G_window_bytes());
+                       streaming ? 0 : p_cfg.L_Y_window_bytes());
+            GROUP_ITEM(shmem_initialize_P, G_window,
+                       streaming ? 0 : p_cfg.G_window_bytes());
             // syrk_S() windows
             NAMED_GROUP_ITEM(shmem, shmem_syrk_S, "syrk_S() windows", 0);
             NAMED_GROUP_ITEM(shmem_syrk_S, syrk_input_windows,
@@ -152,51 +156,69 @@ namespace Sdpb::Sdpa
               ALLOC(S, sizes.S_bytes);
               {
                 FUNC_SCOPE(compute_S);
-                // #184: P is packed into integer records as it is produced
-                // (resident only with the RAM backend; ~0 when SDPB_P_SPILL_DIR
-                // sends it to a file), and only one chunk of BigFloat P exists
-                // at a time (see the p_range scope below).
-                const size_t P_record_bytes
-                  = 8 * ((El::gmp::Precision() + 1 + 63) / 64 + 1);
-                const size_t P_elements
-                  = p_cfg.node_P_bytes() / bigfloat_bytes();
-                NAMED_ALLOC(P_spill, "P (packed spill)",
-                            std::getenv("SDPB_P_SPILL_DIR") == nullptr
-                              ? P_elements * P_record_bytes
-                              : 0);
-                // Temporary allocations inside initialize_P()
-                {
-                  FUNC_SCOPE(initialize_P);
-                  ALLOC(L_X_inv, sizes.X_bytes);
-                  ALLOC(L_Y, sizes.X_bytes);
-                  ALLOC(L_X_inv_normalizer, p_cfg.node_L_normalizer_bytes());
-                  ALLOC(L_Y_normalizer, p_cfg.node_L_normalizer_bytes());
-                  TEMP_ALLOC("normalize_and_shift(L_X_inv)",
-                             p_cfg.node_normalize_and_shift_L_bytes());
-                  TEMP_ALLOC("normalize_and_shift(L_Y)",
-                             p_cfg.node_normalize_and_shift_L_bytes());
+                if(streaming)
                   {
-                    NAMED_SCOPE(p_range, "loop over p index");
-                    ALLOC(G, p_cfg.node_G_bytes());
-                    NAMED_ALLOC(P_chunk, "P chunk (BigFloat)",
-                                p_cfg.node_P_bytes() / p_cfg.split_factor);
-                    {
-                      FUNC_SCOPE(trmm);
-                      ALLOC(G_normalizer, p_cfg.node_G_Normalizer_bytes());
-                      TEMP_ALLOC("normalize_and_shift(G)",
-                                 p_cfg.node_normalize_and_shift_G_bytes());
-                    }
-                    TEMP_ALLOC("reshape", p_cfg.node_reshape_bytes());
+                    // One band of rows of P as BigFloat (window height x m),
+                    // the per-band S, and local copies of L_X^{-1}, L_Y.
+                    NAMED_ALLOC(band, "P band (BigFloat)",
+                                syrk_cfg.input_window_height()
+                                  * syrk_cfg.input_width
+                                  * bigfloat_bytes());
+                    NAMED_ALLOC(S_band, "S_band", sizes.S_bytes);
+                    NAMED_ALLOC(L_copies, "L_X_inv, L_Y", 2 * sizes.X_bytes);
+                    TEMP_ALLOC("normalize_and_shift(band)",
+                               syrk_cfg.node_normalize_and_shift_P_bytes());
+                    TEMP_ALLOC("reduce_scatter()",
+                               syrk_cfg.node_reduce_scatter_bytes());
                   }
-                }
-                {
-                  FUNC_SCOPE(syrk_S);
-                  ALLOC(P_normalizer, syrk_cfg.node_P_normalizer_bytes());
-                  TEMP_ALLOC("normalize_and_shift(P)",
-                             syrk_cfg.node_normalize_and_shift_P_bytes());
-                  TEMP_ALLOC("reduce_scatter()",
-                             syrk_cfg.node_reduce_scatter_bytes());
-                }
+                else
+                  {
+                    // #184: P is packed into integer records as it is produced
+                    // (resident only with the RAM backend; ~0 when SDPB_P_SPILL_DIR
+                    // sends it to a file), and only one chunk of BigFloat P exists
+                    // at a time (see the p_range scope below).
+                    const size_t P_record_bytes
+                      = 8 * ((El::gmp::Precision() + 1 + 63) / 64 + 1);
+                    const size_t P_elements
+                      = p_cfg.node_P_bytes() / bigfloat_bytes();
+                    NAMED_ALLOC(P_spill, "P (packed spill)",
+                                std::getenv("SDPB_P_SPILL_DIR") == nullptr
+                                  ? P_elements * P_record_bytes
+                                  : 0);
+                    // Temporary allocations inside initialize_P()
+                    {
+                      FUNC_SCOPE(initialize_P);
+                      ALLOC(L_X_inv, sizes.X_bytes);
+                      ALLOC(L_Y, sizes.X_bytes);
+                      ALLOC(L_X_inv_normalizer, p_cfg.node_L_normalizer_bytes());
+                      ALLOC(L_Y_normalizer, p_cfg.node_L_normalizer_bytes());
+                      TEMP_ALLOC("normalize_and_shift(L_X_inv)",
+                                 p_cfg.node_normalize_and_shift_L_bytes());
+                      TEMP_ALLOC("normalize_and_shift(L_Y)",
+                                 p_cfg.node_normalize_and_shift_L_bytes());
+                      {
+                        NAMED_SCOPE(p_range, "loop over p index");
+                        ALLOC(G, p_cfg.node_G_bytes());
+                        NAMED_ALLOC(P_chunk, "P chunk (BigFloat)",
+                                    p_cfg.node_P_bytes() / p_cfg.split_factor);
+                        {
+                          FUNC_SCOPE(trmm);
+                          ALLOC(G_normalizer, p_cfg.node_G_Normalizer_bytes());
+                          TEMP_ALLOC("normalize_and_shift(G)",
+                                     p_cfg.node_normalize_and_shift_G_bytes());
+                        }
+                        TEMP_ALLOC("reshape", p_cfg.node_reshape_bytes());
+                      }
+                    }
+                    {
+                      FUNC_SCOPE(syrk_S);
+                      ALLOC(P_normalizer, syrk_cfg.node_P_normalizer_bytes());
+                      TEMP_ALLOC("normalize_and_shift(P)",
+                                 syrk_cfg.node_normalize_and_shift_P_bytes());
+                      TEMP_ALLOC("reduce_scatter()",
+                                 syrk_cfg.node_reduce_scatter_bytes());
+                    }
+                  }
               }
 
               const auto S_dim = cfg.initialize_P_config.primal_dimension;
