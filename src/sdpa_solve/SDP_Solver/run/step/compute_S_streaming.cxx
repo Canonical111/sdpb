@@ -27,6 +27,7 @@
 #include <gmp.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -210,17 +211,26 @@ namespace Sdpb::Sdpa
     const El::BigFloat one(1);
     const El::BigFloat eps = one >> static_cast<int>(bits / 2);
 
+    // Timers keeps one list node per Scoped_Timer for the whole run, and the syrk driver
+    // opens dozens per call: with ~100-200 bands per iteration that grew the process by
+    // ~2 MB per iteration. Per-band internals therefore go to a scratch Timers, and the
+    // phases are accumulated here; set SDPB_STREAM_P_PROFILE to print them.
+    using clock = std::chrono::steady_clock;
+    std::chrono::duration<double> t_rows{0}, t_normalize{0}, t_syrk{0};
+    const bool print_profile = std::getenv("SDPB_STREAM_P_PROFILE") != nullptr;
+    Scoped_Timer bands_timer(timers, "bands");
+
     for(size_t t = 0; t < num_iterations; ++t)
       {
-        Scoped_Timer band_timer(timers, "band");
+        Timers band_timers;
         // One matrix per local block (zero height when the block is not in this band).
         Block_Matrix band;
         band.width = m;
         band.blocks.reserve(num_blocks);
         for(size_t b = 0; b < num_blocks; ++b)
           band.blocks.emplace_back(0, m, X_cholesky.blocks.at(b).Grid());
+        const auto t0 = clock::now();
         {
-          Scoped_Timer compute_timer(timers, "compute_rows");
           if(t < bands.size())
             for(const auto &slab : bands.at(t))
               {
@@ -233,13 +243,13 @@ namespace Sdpb::Sdpa
               }
         }
 
+        const auto t1 = clock::now();
         // Per-band column normalization (global over ranks: all rows of this band
         // enter one syrk accumulation).
-        Scoped_Timer normalize_timer(timers, "normalize");
         const auto normalizer
           = normalize_and_shift<Matrix_Normalization_Kind::COLUMNS>(
             band, bits, El::mpi::COMM_WORLD);
-        normalize_timer.stop();
+        const auto t2 = clock::now();
 
         const BigInt_Shared_Memory_Syrk_Context::Band_Provider provider
           = [&band](El::Int, El::Int, const El::Range<El::Int> &col_range,
@@ -274,7 +284,7 @@ namespace Sdpb::Sdpa
               value *= norms.at(i) * norms.at(j);
               S.UpdateLocal(S.LocalRow(i), S.LocalCol(j), value);
             };
-            syrk_context.bigint_syrk_blas_from_bands(uplo, provider, S, timers,
+            syrk_context.bigint_syrk_blas_from_bands(uplo, provider, S, band_timers,
                                                      block_timings_ms, 1);
             syrk_context.restore_callback = nullptr;
           }
@@ -282,8 +292,7 @@ namespace Sdpb::Sdpa
           {
             El::Zero(S_band);
             syrk_context.bigint_syrk_blas_from_bands(
-              uplo, provider, S_band, timers, block_timings_ms, 1);
-            Scoped_Timer accumulate_timer(timers, "restore_accumulate");
+              uplo, provider, S_band, band_timers, block_timings_ms, 1);
             restore_syrk_output(uplo, normalizer, S_band);
             for(El::Int jLoc = 0; jLoc < S.LocalWidth(); ++jLoc)
               {
@@ -296,6 +305,13 @@ namespace Sdpb::Sdpa
                   }
               }
           }
+        t_rows += t1 - t0;
+        t_normalize += t2 - t1;
+        t_syrk += clock::now() - t2;
       }
+    if(print_profile && El::mpi::Rank(El::mpi::COMM_WORLD) == 0)
+      El::Output("S_stream: ", num_iterations, " bands; rows ", t_rows.count(),
+                 " s, normalize ", t_normalize.count(), " s, syrk+restore ",
+                 t_syrk.count(), " s");
   }
 }
