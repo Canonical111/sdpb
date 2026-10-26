@@ -6,6 +6,9 @@
 #include "sdpb_util/split_range.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
+#include <cstdlib>
+#include <string>
+
 // Q = P^T P
 // See sdp_solve/SDP_Solver/run/step/initialize_schur_complement_solver/compute_Q.cxx
 // TODO rename
@@ -149,6 +152,56 @@ namespace Sdpb::Sdpa
 
         // Copy each G_p into a p-th column of the corresponding block of P
         Scoped_Timer reshape_timer(timers, "reshape");
+        // lab (bfss #77), LAB_BATCHED_RESHAPE=1: the same updates as
+        // El::Reshape below (zero, then QueueUpdate of each entry of G_p at
+        // (i + j * dim, p)), but queued for all p of this chunk and sent in one
+        // ProcessQueues per block instead of one per (block, p). Each entry of P
+        // receives exactly one update, 0 + value, as with El::Reshape, so the
+        // values are the same.
+        static const bool batched_reshape = [] {
+          const char *env = std::getenv("LAB_BATCHED_RESHAPE");
+          return env != nullptr && std::string(env) == "1";
+        }();
+        if(batched_reshape)
+          {
+            for(size_t block = 0; block < block_info.num_blocks_local();
+                 ++block)
+              {
+                auto &P_block = result.blocks.at(block);
+                {
+                  auto P_columns = El::View(
+                    P_block, El::Range<int>(0, P_block.Height()),
+                    El::Range<int>(p_begin, p_end));
+                  El::Zero(P_columns);
+                }
+                size_t num_local = 0;
+                for(size_t p = p_begin; p < p_end; ++p)
+                  {
+                    const auto &G_p_block = G.at(p - p_begin).blocks.at(block);
+                    num_local += G_p_block.LocalHeight() * G_p_block.LocalWidth();
+                  }
+                P_block.Reserve(num_local);
+                for(size_t p = p_begin; p < p_end; ++p)
+                  {
+                    const auto &G_p_block = G.at(p - p_begin).blocks.at(block);
+                    const int dim = G_p_block.Height();
+                    ASSERT_EQUAL(dim * dim, P_block.Height());
+                    for(int jLoc = 0; jLoc < G_p_block.LocalWidth(); ++jLoc)
+                      {
+                        const int j = G_p_block.GlobalCol(jLoc);
+                        for(int iLoc = 0; iLoc < G_p_block.LocalHeight();
+                            ++iLoc)
+                          {
+                            const int i = G_p_block.GlobalRow(iLoc);
+                            P_block.QueueUpdate(i + j * dim, p,
+                                                G_p_block.GetLocal(iLoc, jLoc));
+                          }
+                      }
+                  }
+                P_block.ProcessQueues();
+              }
+            continue;
+          }
         for(size_t block = 0; block < block_info.num_blocks_local(); ++block)
           {
             const auto global_block_index = block_info.block_indices.at(block);
