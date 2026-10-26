@@ -1,5 +1,6 @@
 #include "sdp_solve/Block_Diagonal_Matrix.hxx"
 #include "sdp_solve/SDP.hxx"
+#include "sdp_solve/compressed_columns.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/Matrix_Normalizer.hxx"
 #include "sdp_solve/SDP_Solver/run/multimodular/Multimodular_Block_Factor.hxx"
@@ -80,11 +81,9 @@ void initialize_schur_off_diagonal(
         {
           auto algorithm = El::TRSM_DEFAULT;
           if(compressed)
-            algorithm = dense_width > 5 * schur_complement_cholesky.blocks[block]
-                                            .Grid()
-                                            .Size()
-                          ? El::TRSM_LARGE
-                          : El::TRSM_MEDIUM;
+            algorithm = trsm_algorithm_for_dense_width(
+              dense_width,
+              schur_complement_cholesky.blocks[block].Grid().Size());
           El::Trsm(El::LeftOrRightNS::LEFT, El::UpperOrLowerNS::LOWER,
                    El::OrientationNS::NORMAL, El::UnitOrNonUnitNS::NON_UNIT,
                    El::BigFloat(1), schur_complement_cholesky.blocks[block],
