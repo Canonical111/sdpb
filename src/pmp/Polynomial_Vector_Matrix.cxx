@@ -139,6 +139,7 @@ namespace
                                const std::vector<El::BigFloat> &sample_points,
                                const Positivity_Domain &domain)
   {
+    ASSERT(!sample_points.empty());
     std::vector<El::BigFloat> row_size(sample_points.size(), 0);
     for(size_t k = 0; k < sample_points.size(); ++k)
       for(int i = 0; i < pvm.Height(); ++i)
@@ -270,6 +271,8 @@ Polynomial_Vector_Matrix::Polynomial_Vector_Matrix(
 
   sample_points = sample_points_or_default(
     sample_points_opt, reduced_prefactor, domain, num_points);
+  // Checked before the scalings and bases are computed from the points
+  ASSERT_EQUAL(sample_points.size(), num_points);
 
   sample_scalings
     = domain.is_interval() && !prefactor_opt.has_value()
@@ -288,6 +291,13 @@ Polynomial_Vector_Matrix::Polynomial_Vector_Matrix(
       }
     return sample_scalings;
   }();
+
+  // s_k P(x_k) = s'_k (sum of squares)(x_k) at the D+1 points is the
+  // polynomial identity P = sum of squares only if s' = s. On the half-line
+  // s' != s is what reducedPrefactor is for, which intervals don't support.
+  if(domain.is_interval() && reduced_sample_scalings != sample_scalings)
+    RUNTIME_ERROR("reducedSampleScalings different from sampleScalings is "
+                  "not supported for an interval domain");
 
   // On an interval, the default bases are built by pmp2sdp
   // at the sample points (see has_default_interval_basis()).
@@ -310,6 +320,17 @@ void Polynomial_Vector_Matrix::validate(const int64_t num_points) const
         ASSERT(domain.contains(x),
                "sample points must lie in the domain [a, b]", DEBUG_STRING(x),
                DEBUG_STRING(domain.a()), DEBUG_STRING(domain.b()));
+      // D+1 equations determine a degree-D polynomial only at D+1
+      // distinct points.
+      auto sorted_points = sample_points;
+      std::sort(sorted_points.begin(), sorted_points.end());
+      for(size_t k = 1; k < sorted_points.size(); ++k)
+        ASSERT(sorted_points[k] != sorted_points[k - 1],
+               "sample points must be distinct",
+               DEBUG_STRING(sorted_points[k]));
+      // The sampled bilinear bases carry sqrt(s_k) (sample_bilinear_basis).
+      for(const auto &s : sample_scalings)
+        ASSERT(s > 0, "sample scalings must be positive", DEBUG_STRING(s));
     }
 
   if(has_default_interval_basis())

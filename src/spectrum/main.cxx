@@ -82,6 +82,14 @@ int main(int argc, char **argv)
       Timers timers(env, verbosity);
       Scoped_Timer timer(timers, "spectrum");
       const auto pmp_info = read_pmp_info(pmp_info_path, timers);
+      // Checked here, since compute_spectrum() turns per-block errors
+      // into warnings.
+      for(const auto &block : pmp_info.blocks)
+        if(block.domain.is_interval())
+          RUNTIME_ERROR("spectrum does not support an interval domain yet: "
+                        "block_",
+                        block.block_index, " has domain [", block.domain.a(),
+                        ", ", block.domain.b(), "]");
 
       // Set --threshold and --minEigenvalueRatio to sqrt(dualityGap), if needed.
       set_default_parameters(solution_dir, pmp_info, need_lambda, verbosity,

@@ -41,7 +41,7 @@ By default, each block must be positive semidefinite for x >= 0. In JSON input, 
 (1 and (x-a)(b-x) for even degree, x-a and b-x for odd degree); see the
 [manual](SDPB_Manual/SDPB-Manual.pdf), Section 3.2. With `"polynomialBasis": "chebyshev"` in `"domain"`, the
 coefficients are given in the Chebyshev polynomials T_i((2x-a-b)/(b-a)) instead of x^i, which keeps high degrees
-accurate at low precision. `spectrum` does not support such blocks yet.
+accurate at low precision. `spectrum` and `pmp2functions` refuse such blocks for now.
 
 The single file Mathematica and JSON formats are described in Section
 3.2 of the [manual](SDPB_Manual/SDPB-Manual.pdf). In addition, for JSON there

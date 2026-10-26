@@ -301,6 +301,65 @@ TEST_CASE("pmp_interval")
     REQUIRE_THROWS(make(std::nullopt, std::nullopt,
                         std::vector<El::BigFloat>{0, 1, 1.5, 1.75, 2},
                         domain));
+    // repeated sample point: only 4 equations for a degree-4 polynomial
+    REQUIRE_THROWS(make(std::nullopt, std::nullopt,
+                        std::vector<El::BigFloat>{0.5, 1, 1, 1.75, 2},
+                        domain));
+    // no sample points, or too few, with equilibrated scalings
+    REQUIRE_THROWS(make(std::nullopt, std::nullopt,
+                        std::vector<El::BigFloat>{}, domain));
+    REQUIRE_THROWS(make(std::nullopt, std::nullopt,
+                        std::vector<El::BigFloat>{0.5, 1, 1.75, 2}, domain));
+
+    const auto make_scaled
+      = [&](const std::optional<std::vector<El::BigFloat>> &scalings,
+            const std::optional<std::vector<El::BigFloat>> &reduced) {
+          return Polynomial_Vector_Matrix(polys, std::nullopt, std::nullopt,
+                                          std::nullopt, std::nullopt, scalings,
+                                          reduced, std::nullopt, domain);
+        };
+    const std::vector<El::BigFloat> ones(5, 1);
+    // reducedSampleScalings equal to sampleScalings: accepted
+    REQUIRE(make_scaled(ones, ones).reduced_sample_scalings == ones);
+    // reducedSampleScalings different from sampleScalings: s P = s' Q at the
+    // points would not mean P = Q
+    REQUIRE_THROWS(
+      make_scaled(ones, std::vector<El::BigFloat>(5, El::BigFloat(1) / 2)));
+    REQUIRE_THROWS(make_scaled(std::nullopt, ones));
+    // non-positive sampleScalings
+    REQUIRE_THROWS(
+      make_scaled(std::vector<El::BigFloat>{1, 1, -1, 1, 1}, std::nullopt));
+    REQUIRE_THROWS(
+      make_scaled(std::vector<El::BigFloat>{1, 1, 0, 1, 1}, std::nullopt));
+  }
+
+  SECTION("Prefactor pole just above b")
+  {
+    {
+      INFO("Regularizing |x - pole| < min_pole_distance keeps the sign of "
+           "x - pole");
+      const Damped_Rational damped{1, 1, {Boost_Float("1e-20")}};
+      DIFF(to_BigFloat(damped.evaluate(0, Boost_Float("1e-16"))),
+           El::BigFloat(-1e16));
+      DIFF(to_BigFloat(damped.evaluate(Boost_Float("2e-20"),
+                                       Boost_Float("1e-16"))),
+           El::BigFloat(1e16));
+    }
+    {
+      INFO("Two poles above b = 2, one within 1e-16 of the sample point x = "
+           "2: positive scalings");
+      const auto domain = interval(El::BigFloat(1) / 2, 2);
+      const Damped_Rational prefactor{
+        1, 1, {Boost_Float("2.00000000000000000001"), Boost_Float(3)}};
+      const auto pvm = Polynomial_Vector_Matrix(
+        polynomials_1d(), prefactor, std::nullopt, std::nullopt,
+        std::vector<El::BigFloat>{0.5, 1, 1.5, 1.75, 2}, std::nullopt,
+        std::nullopt, std::nullopt, domain);
+      for(const auto &s : pvm.sample_scalings)
+        REQUIRE(s > 0);
+      // (2 - pole_1)(2 - pole_2) regularized to (-1e-16)(-1)
+      DIFF(pvm.sample_scalings.at(4), El::BigFloat(1e16));
+    }
   }
 
   SECTION("Chebyshev polynomial basis")

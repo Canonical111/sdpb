@@ -24,13 +24,11 @@ struct Damped_Rational
       {
         Boost_Float delta = x - pole;
 
-        // Regularize value at small denominator
+        // Regularize value at small denominator, keeping its sign
+        // (x - pole < 0 for a pole above an interval domain)
         if(abs(delta) < min_pole_distance)
-          {
-            delta = min_pole_distance;
-            if(sign(delta) < 0)
-              delta = -delta;
-          }
+          delta = sign(delta) < 0 ? Boost_Float(-min_pole_distance)
+                                  : min_pole_distance;
 
         denominator *= delta;
       }

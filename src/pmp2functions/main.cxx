@@ -31,6 +31,17 @@ int main(int argc, char **argv)
       const auto pmp = read_polynomial_matrix_program(
         env, parameters.input_file, parameters.max_num_poles,
         parameters.verbosity, timers);
+      // The functions format and outer_limits assume x >= 0
+      // and monomial coefficients.
+      for(size_t i = 0; i < pmp.matrices.size(); ++i)
+        {
+          const auto &domain = pmp.matrices[i].domain;
+          if(domain.is_interval())
+            RUNTIME_ERROR("pmp2functions does not support an interval "
+                          "domain yet: block_",
+                          pmp.matrix_index_local_to_global.at(i),
+                          " has domain [", domain.a(), ", ", domain.b(), "]");
+        }
       write_functions(parameters.output_path, pmp);
     }
   catch(std::exception &e)

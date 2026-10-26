@@ -257,6 +257,37 @@ TEST_CASE("end-to-end_tests")
     test.run();
   }
 
+  SECTION("1d-interval refused by spectrum and pmp2functions")
+  {
+    INFO("spectrum and pmp2functions/outer_limits assume x >= 0 and "
+         "monomials: both must exit with an error on an interval block, not "
+         "write a result.");
+    const auto data_dir
+      = Test_Config::test_data_dir / "end-to-end_tests" / "1d-interval";
+    const Test_Case_Runner runner("end-to-end_tests/1d-interval-refused");
+    const auto output_dir = runner.output_dir;
+
+    Named_Args_Map spectrum_args{
+      {"--pmpInfo", (data_dir / "output" / "sdp" / "pmp_info.json").string()},
+      {"--solution", (data_dir / "output" / "out").string()},
+      {"--threshold", "1e-10"},
+      {"--output", (output_dir / "spectrum.json").string()},
+      {"--precision", "768"},
+    };
+    runner.create_nested("spectrum")
+      .mpi_run({"build/spectrum", spectrum_args}, 2, 1,
+               "spectrum does not support an interval domain");
+    REQUIRE(!exists(output_dir / "spectrum.json"));
+
+    const auto functions_json = output_dir / "functions.json";
+    runner.create_nested("pmp2functions")
+      .run({"build/pmp2functions",
+            {"768", (data_dir / "input" / "pmp.json").string(),
+             functions_json.string()}},
+           1, "pmp2functions does not support an interval domain");
+    REQUIRE(!exists(functions_json));
+  }
+
   SECTION("1d-constraints")
   {
     INFO("Same as 1d, but with nontrivial semidefiniteness constraints.");
