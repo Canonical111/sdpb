@@ -544,6 +544,9 @@ Multimodular_Block_Factor::~Multimodular_Block_Factor() = default;
 bool Multimodular_Block_Factor::shared() const
 { return storage->shared != nullptr; }
 
+const El::Matrix<El::BigFloat> &Multimodular_Block_Factor::lower() const
+{ return storage->L(); }
+
 void Multimodular_Block_Factor::cholesky(
   const El::DistMatrix<El::BigFloat> &schur,
   El::DistMatrix<El::BigFloat> &cholesky, Timers &timers)

@@ -4,6 +4,7 @@
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/Matrix_Normalizer.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/streaming_syrk.hxx"
 #include "sdp_solve/SDP_Solver/run/multimodular/Multimodular_Block_Factor.hxx"
+#include "sdp_solve/SDP_Solver/run/multimodular/multimodular_blas.hxx"
 #include "sdp_solve/memory_estimates.hxx"
 #include "sdpb_util/memory_trace.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
@@ -16,13 +17,18 @@
 #include <string>
 
 // schur_complement_cholesky := its Cholesky factor L (in place: it holds the Schur
-// complement on entry), and schur_off_diagonal = L^{-1} B
+// complement on entry), and schur_off_diagonal = L^{-1} B.
+// With streaming_factors (#184, streaming Q), only the factors: L^{-1} B is left to
+// syrk_Q_streaming(), and with --multimodularTrsm the factor objects of blocks on
+// several ranks are kept there (nullptr for blocks on one rank).
 void initialize_schur_off_diagonal(
   const Environment &env, const SDP &sdp, const Block_Info &block_info,
   Block_Matrix &schur_off_diagonal,
   Block_Diagonal_Matrix &schur_complement_cholesky, Timers &timers,
   El::Matrix<int32_t> &block_timings_ms, const bool multimodular_trsm,
-  const Verbosity verbosity, const bool cholesky_only = false)
+  const Verbosity verbosity,
+  std::vector<std::unique_ptr<Multimodular_Block_Factor>> *streaming_factors
+  = nullptr)
 {
   schur_off_diagonal.blocks.clear();
   // Setting correct width is needed for Block_Matrix_Normalizer.
@@ -36,22 +42,28 @@ void initialize_schur_off_diagonal(
       const auto global_block_index = block_info.block_indices.at(block);
       auto block_index_string = std::to_string(global_block_index);
       // --multimodularTrsm: Cholesky and L^{-1} B with multimodular BLAS,
-      // see SDP_Solver/run/multimodular/Readme.md
+      // see SDP_Solver/run/multimodular/Readme.md. #184: the factor is formed in
+      // place (schur_complement_cholesky holds S on entry); a block on one rank needs
+      // no factor object, its local matrix is factored directly.
+      auto &cholesky = schur_complement_cholesky.blocks[block];
+      const bool one_rank = cholesky.Grid().Size() == 1;
+      const Multimodular_Blas_Config multimodular_config;
+      Multimodular_Blas_Timings multimodular_timings;
       std::unique_ptr<Multimodular_Block_Factor> multimodular_factor;
-      if(multimodular_trsm)
+      if(multimodular_trsm && !one_rank)
         multimodular_factor = std::make_unique<Multimodular_Block_Factor>(
-          schur_complement_cholesky.blocks[block], Multimodular_Blas_Config());
+          cholesky, multimodular_config);
       {
         Scoped_Timer cholesky_timer(timers, "cholesky_" + block_index_string);
         try
           {
             if(multimodular_factor)
-              multimodular_factor->cholesky(
-                schur_complement_cholesky.blocks[block],
-                schur_complement_cholesky.blocks[block], timers);
+              multimodular_factor->cholesky(cholesky, cholesky, timers);
+            else if(multimodular_trsm)
+              multimodular_cholesky_lower(cholesky.Matrix(), multimodular_config,
+                                          multimodular_timings);
             else
-              Cholesky(El::UpperOrLowerNS::LOWER,
-                       schur_complement_cholesky.blocks[block]);
+              Cholesky(El::UpperOrLowerNS::LOWER, cholesky);
           }
         catch(std::exception &e)
           {
@@ -63,19 +75,25 @@ void initialize_schur_off_diagonal(
           += cholesky_timer.elapsed_milliseconds();
       }
 
-      if(cholesky_only)
-        continue;
+      if(streaming_factors != nullptr)
+        {
+          streaming_factors->push_back(std::move(multimodular_factor));
+          continue;
+        }
       // schur_off_diagonal = L^{-1} B
       Scoped_Timer solve_timer(timers, "solve_" + block_index_string);
 
       schur_off_diagonal.blocks.push_back(sdp.free_var_matrix.blocks[block]);
+      auto &L_inv_B = schur_off_diagonal.blocks[block];
       if(multimodular_factor)
-        multimodular_factor->solve(schur_off_diagonal.blocks[block], timers);
+        multimodular_factor->solve(L_inv_B, timers);
+      else if(multimodular_trsm)
+        multimodular_trsm_left_lower(cholesky.LockedMatrix(), L_inv_B.Matrix(),
+                                     multimodular_config, multimodular_timings);
       else
         El::Trsm(El::LeftOrRightNS::LEFT, El::UpperOrLowerNS::LOWER,
                  El::OrientationNS::NORMAL, El::UnitOrNonUnitNS::NON_UNIT,
-                 El::BigFloat(1), schur_complement_cholesky.blocks[block],
-                 schur_off_diagonal.blocks[block]);
+                 El::BigFloat(1), cholesky, L_inv_B);
       block_timings_ms(global_block_index, 0)
         += solve_timer.elapsed_milliseconds();
     }
@@ -127,9 +145,16 @@ void syrk_Q(const Environment &env, Block_Matrix &schur_off_diagonal,
 // (solve_schur_complement_equation()).
 // A block may span several ranks: they form one MPI group, share all its blocks, and so
 // have identical band schedules.
-void syrk_Q_streaming(const SDP &sdp, const Block_Info &block_info,
-                      const Block_Diagonal_Matrix &schur_complement_cholesky,
-                      BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,
+// With --multimodularTrsm the panels are solved with multimodular BLAS, each rank for its
+// own columns of T_j ([STAR,VR]) against the whole factor: the block's local matrix on one
+// rank, or the factor object's lower triangle (multimodular_factors[block]) on several.
+void syrk_Q_streaming(
+  const SDP &sdp, const Block_Info &block_info,
+  const Block_Diagonal_Matrix &schur_complement_cholesky,
+  const bool multimodular_trsm,
+  const std::vector<std::unique_ptr<Multimodular_Block_Factor>>
+    &multimodular_factors,
+  BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,
                       El::DistMatrix<El::BigFloat> &Q, Timers &timers,
                       El::Matrix<int32_t> &block_timings_ms)
 {
@@ -201,8 +226,13 @@ void syrk_Q_streaming(const SDP &sdp, const Block_Info &block_info,
   for(size_t block = 0; block < num_blocks; ++block)
     total_cost += rows_cost(B.blocks.at(block).Height());
 
+  // T_j: [MC,MR] like B_j (El), or this rank's columns of it (multimodular).
   std::vector<std::unique_ptr<El::DistMatrix<El::BigFloat>>> L_inv_B(
     num_blocks);
+  std::vector<std::unique_ptr<El::DistMatrix<El::BigFloat, El::STAR, El::VR>>>
+    L_inv_B_columns(num_blocks);
+  const Multimodular_Blas_Config multimodular_config;
+  Multimodular_Blas_Timings multimodular_timings;
   // Rows of T_j computed so far in this pass (kept after T_j is freed).
   std::vector<El::Int> rows_done(num_blocks, 0);
   const auto produce_band
@@ -210,8 +240,11 @@ void syrk_Q_streaming(const SDP &sdp, const Block_Info &block_info,
         if(t == 0)
           std::fill(rows_done.begin(), rows_done.end(), 0);
         for(size_t block = 0; block < num_blocks; ++block)
-          if(L_inv_B.at(block) && (t == 0 || last_band.at(block) < t))
-            L_inv_B.at(block).reset();
+          if(t == 0 || last_band.at(block) < t)
+            {
+              L_inv_B.at(block).reset();
+              L_inv_B_columns.at(block).reset();
+            }
         blocks.clear();
         blocks.reserve(num_blocks);
         for(size_t block = 0; block < num_blocks; ++block)
@@ -247,12 +280,41 @@ void syrk_Q_streaming(const SDP &sdp, const Block_Info &block_info,
                 Timer trsm_timer;
                 const auto &B_block = B.blocks.at(block);
                 const auto &L = schur_complement_cholesky.blocks.at(block);
+                const El::IR rows(r0, r1);
+                const El::IR above(0, r0);
+                if(multimodular_trsm)
+                  {
+                    auto &T = L_inv_B_columns.at(block);
+                    if(!T)
+                      {
+                        T = std::make_unique<
+                          El::DistMatrix<El::BigFloat, El::STAR, El::VR>>(
+                          B_block.Grid());
+                        *T = B_block;
+                      }
+                    const auto &factor = multimodular_factors.at(block);
+                    const El::Matrix<El::BigFloat> &L_local
+                      = factor ? factor->lower() : L.LockedMatrix();
+                    auto &X = T->Matrix();
+                    El::Matrix<El::BigFloat> panel;
+                    El::View(panel, X, rows, El::ALL);
+                    if(r0 > 0)
+                      multimodular_gemm_sub(
+                        panel, El::LockedView(L_local, rows, above),
+                        El::NORMAL, El::LockedView(X, above, El::ALL), false,
+                        multimodular_config, multimodular_timings);
+                    multimodular_trsm_left_lower(
+                      El::LockedView(L_local, rows, rows), panel,
+                      multimodular_config, multimodular_timings);
+                    rows_done.at(block) = r1;
+                    block_timings_ms(block_info.block_indices.at(block), 0)
+                      += trsm_timer.elapsed_milliseconds();
+                    continue;
+                  }
                 auto &T = L_inv_B.at(block);
                 if(!T)
                   T = std::make_unique<El::DistMatrix<El::BigFloat>>(
                     B_block.Height(), N, B_block.Grid());
-                const El::IR rows(r0, r1);
-                const El::IR above(0, r0);
                 El::DistMatrix<El::BigFloat> panel;
                 El::View(panel, *T, rows, El::ALL);
                 El::Copy(El::LockedView(B_block, rows, El::ALL), panel);
@@ -273,10 +335,16 @@ void syrk_Q_streaming(const SDP &sdp, const Block_Info &block_info,
         // The syrk scales the band in place, and later panels still need these rows of
         // T unscaled: hand it a copy.
         for(const auto &piece : bands.at(t))
-          El::Copy(El::LockedView(*L_inv_B.at(piece.block),
-                                  El::IR(piece.row_begin, piece.row_end),
-                                  El::ALL),
-                   blocks.at(piece.block));
+          {
+            const El::IR rows(piece.row_begin, piece.row_end);
+            if(multimodular_trsm)
+              El::Copy(El::LockedView(*L_inv_B_columns.at(piece.block), rows,
+                                      El::ALL),
+                       blocks.at(piece.block));
+            else
+              El::Copy(El::LockedView(*L_inv_B.at(piece.block), rows, El::ALL),
+                       blocks.at(piece.block));
+          }
       };
 
   Streaming_Syrk::Profile profile;
@@ -284,6 +352,8 @@ void syrk_Q_streaming(const SDP &sdp, const Block_Info &block_info,
     bigint_syrk_context, num_bands, produce_band,
     [&] {
       for(auto &block : L_inv_B)
+        block.reset();
+      for(auto &block : L_inv_B_columns)
         block.reset();
     },
     bigint_syrk_context.band_column_exponents, Q, block_timings_ms, profile);
@@ -306,7 +376,17 @@ void syrk_Q_streaming(const SDP &sdp, const Block_Info &block_info,
                  ", reduce ", sp.reduce, "), restore ",
                  profile.restore.count(), " s; log2(norm/2^E) in [",
                  profile.lowest, ", ", profile.highest, "]; trsm by rank [",
-                 ranks.str(), "]");
+                 ranks.str(), "]",
+                 multimodular_trsm
+                   ? El::BuildString("; multimodular (rank 0): to_int ",
+                                     multimodular_timings.to_int_seconds,
+                                     " s, blas ",
+                                     multimodular_timings.blas_seconds,
+                                     " s, from_int ",
+                                     multimodular_timings.from_int_seconds,
+                                     " s, base ",
+                                     multimodular_timings.base_seconds, " s")
+                   : std::string());
     }
 }
 
@@ -323,14 +403,16 @@ void compute_Q(const Environment &env, const SDP &sdp,
   // #184: streaming leaves schur_off_diagonal empty.
   const bool streaming = Streaming_Syrk::enabled()
                          && bigint_syrk_context.can_accumulate_bands(Q);
+  std::vector<std::unique_ptr<Multimodular_Block_Factor>> streaming_factors;
   initialize_schur_off_diagonal(env, sdp, block_info, schur_off_diagonal,
                                 schur_complement_cholesky, timers,
                                 block_timings_ms, multimodular_trsm, verbosity,
-                                streaming);
+                                streaming ? &streaming_factors : nullptr);
   memory_trace(streaming ? "Cholesky done" : "Cholesky and L^{-1} B done");
   if(streaming)
     syrk_Q_streaming(sdp, block_info, schur_complement_cholesky,
-                     bigint_syrk_context, Q, timers, block_timings_ms);
+                     multimodular_trsm, streaming_factors, bigint_syrk_context,
+                     Q, timers, block_timings_ms);
   else
     syrk_Q(env, schur_off_diagonal, bigint_syrk_context, Q, timers,
            block_timings_ms, verbosity);

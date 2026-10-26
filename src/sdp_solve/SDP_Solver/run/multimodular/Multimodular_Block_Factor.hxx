@@ -36,6 +36,9 @@ public:
                 El::DistMatrix<El::BigFloat> &cholesky, Timers &timers);
   // B := L^{-1} B (B on the same grid as schur)
   void solve(El::DistMatrix<El::BigFloat> &B, Timers &timers);
+  // The lower triangle of L, whole, as this rank sees it (after cholesky()).
+  // #184: streaming Q solves this rank's columns of L^{-1} B against it panel by panel.
+  const El::Matrix<El::BigFloat> &lower() const;
 
   bool shared() const;
 
