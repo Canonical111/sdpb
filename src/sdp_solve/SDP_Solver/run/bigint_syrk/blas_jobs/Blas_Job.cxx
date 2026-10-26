@@ -71,6 +71,4 @@ Blas_Job::Blas_Job(Kind kind, size_t prime_index, const El::Range<El::Int> &I,
 }
 
 Blas_Job Blas_Job::with_cost(const Blas_Job &job, const Cost &cost)
-{
-  return Blas_Job(job.kind, job.prime_index, job.I, job.J, cost);
-}
+{ return Blas_Job(job.kind, job.prime_index, job.I, job.J, cost); }

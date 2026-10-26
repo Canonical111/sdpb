@@ -101,8 +101,7 @@ Timers solve(const Block_Info &block_info, const SDPB_Parameters &parameters,
                      counts[1] == 0 ? 0.0 : double(counts[0]) / counts[1],
                      ")");
           if(parameters.verbosity >= Verbosity::debug)
-            El::Output("compressLinvB: per rank kept/dense:",
-                       ranks_ss.str());
+            El::Output("compressLinvB: per rank kept/dense:", ranks_ss.str());
         }
     }
   if(parameters.verbosity >= Verbosity::debug)

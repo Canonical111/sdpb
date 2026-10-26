@@ -110,9 +110,7 @@ namespace
 
   El::Range<El::Int>
   intersect(const El::Range<El::Int> &a, const El::Range<El::Int> &b)
-  {
-    return {std::max(a.beg, b.beg), std::min(a.end, b.end)};
-  }
+  { return {std::max(a.beg, b.beg), std::min(a.end, b.end)}; }
 
   // --compressLinvB: the same job, but each row segment of the window is
   // multiplied on its nonzero column runs only. The products left out are
@@ -215,10 +213,9 @@ namespace
                                    ? *input_grouped_block_residues_window_A
                                    : *input_grouped_block_residues_window_B;
           if(segments != nullptr)
-            do_blas_job_on_segments(job, uplo,
-                                    *input_grouped_block_residues_window_A,
-                                    window_B, *output_residues_window,
-                                    *segments, offset_A, offset_B);
+            do_blas_job_on_segments(
+              job, uplo, *input_grouped_block_residues_window_A, window_B,
+              *output_residues_window, *segments, offset_A, offset_B);
           else
             do_blas_job(job, uplo, *input_grouped_block_residues_window_A,
                         window_B, *output_residues_window);
@@ -302,8 +299,8 @@ void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas(
       ASSERT_EQUAL(column_maps->size(), bigint_input_matrix_blocks.size());
       for(const auto &column_map : *column_maps)
         {
-          auto &inverse = column_inverse_maps.emplace_back(
-            bigint_output.Height(), -1);
+          auto &inverse
+            = column_inverse_maps.emplace_back(bigint_output.Height(), -1);
           for(size_t k = 0; k < column_map.size(); ++k)
             if(column_map[k] >= 0)
               inverse.at(column_map[k]) = k;
@@ -315,10 +312,9 @@ void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas(
   // block (SDPB_COMPRESS_SYRK=0: full width, for comparison)
   std::vector<std::vector<Block_Column_Runs>> node_column_runs;
   const char *compress_syrk_env = std::getenv("SDPB_COMPRESS_SYRK");
-  const bool compress_syrk
-    = column_maps != nullptr
-      && !(compress_syrk_env != nullptr
-           && std::string(compress_syrk_env) == "0");
+  const bool compress_syrk = column_maps != nullptr
+                             && !(compress_syrk_env != nullptr
+                                  && std::string(compress_syrk_env) == "0");
   if(compress_syrk)
     {
       Scoped_Timer runs_timer(timers, "gather_column_runs");
@@ -387,9 +383,10 @@ void BigInt_Shared_Memory_Syrk_Context::bigint_syrk_blas_shmem_submatrix(
     = node_column_runs != nullptr
       && !(weighted_env != nullptr && std::string(weighted_env) == "0");
   const auto blas_job_schedule
-    = weighted ? get_weighted_blas_job_schedule(kind, uplo, output_I, output_J,
-                                                *node_column_runs)
-               : get_blas_job_schedule(kind, uplo, output_height, output_width);
+    = weighted
+        ? get_weighted_blas_job_schedule(kind, uplo, output_I, output_J,
+                                         *node_column_runs)
+        : get_blas_job_schedule(kind, uplo, output_height, output_width);
 
   // Clear input and output windows
   clear_residues(*blas_job_schedule);

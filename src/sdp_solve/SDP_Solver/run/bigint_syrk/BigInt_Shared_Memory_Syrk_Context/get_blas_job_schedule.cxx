@@ -22,7 +22,8 @@ namespace
 {
   El::Int overlap(const El::Range<El::Int> &a, const El::Range<El::Int> &b)
   {
-    return std::max<El::Int>(0, std::min(a.end, b.end) - std::max(a.beg, b.beg));
+    return std::max<El::Int>(0,
+                             std::min(a.end, b.end) - std::max(a.beg, b.beg));
   }
 }
 
@@ -40,7 +41,8 @@ BigInt_Shared_Memory_Syrk_Context::get_weighted_blas_job_schedule(
      it != weighted_blas_job_schedule_cache.end())
     return it->second;
 
-  const El::Int offset_B = kind == Blas_Job::syrk ? output_I.beg : output_J.beg;
+  const El::Int offset_B
+    = kind == Blas_Job::syrk ? output_I.beg : output_J.beg;
   const auto job_cost = [&](const Blas_Job &job) -> Blas_Job::Cost {
     const El::Range<El::Int> I(job.I.beg + output_I.beg,
                                job.I.end + output_I.beg);
@@ -83,8 +85,8 @@ BigInt_Shared_Memory_Syrk_Context::get_weighted_blas_job_schedule(
   auto [it, inserted] = weighted_blas_job_schedule_cache.emplace(
     key, std::make_shared<Blas_Job_Schedule>(create_weighted_blas_job_schedule(
            kind, uplo, shared_memory_comm.Size(), comb.num_primes,
-           output_I.end - output_I.beg, output_J.end - output_J.beg,
-           verbosity, job_cost)));
+           output_I.end - output_I.beg, output_J.end - output_J.beg, verbosity,
+           job_cost)));
   ASSERT(inserted);
   return it->second;
 }

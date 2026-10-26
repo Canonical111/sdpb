@@ -73,6 +73,4 @@ compress_columns(const El::DistMatrix<El::BigFloat> &dense,
 // L^{-1} B of this width (LEFT, LOWER, NORMAL)
 inline El::TrsmAlgorithm
 trsm_algorithm_for_dense_width(const El::Int dense_width, const int grid_size)
-{
-  return dense_width > 5 * grid_size ? El::TRSM_LARGE : El::TRSM_MEDIUM;
-}
+{ return dense_width > 5 * grid_size ? El::TRSM_LARGE : El::TRSM_MEDIUM; }

@@ -115,7 +115,8 @@ private:
   [[nodiscard]] std::shared_ptr<Blas_Job_Schedule>
   get_blas_job_schedule(Blas_Job::Kind kind, El::UpperOrLower uplo,
                         El::Int output_height, El::Int output_width);
-  [[nodiscard]] std::shared_ptr<Blas_Job_Schedule> get_weighted_blas_job_schedule(
+  [[nodiscard]] std::shared_ptr<Blas_Job_Schedule>
+  get_weighted_blas_job_schedule(
     Blas_Job::Kind kind, El::UpperOrLower uplo,
     const El::Range<El::Int> &output_I, const El::Range<El::Int> &output_J,
     const std::vector<std::vector<Block_Column_Runs>> &node_column_runs);

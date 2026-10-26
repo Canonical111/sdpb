@@ -41,8 +41,9 @@ namespace
   }
 
   // Random columns set to zero: about `fraction` of them; seeded per block
-  std::vector<int> random_nonzero_columns(const int width, const double fraction,
-                                          const unsigned seed)
+  std::vector<int>
+  random_nonzero_columns(const int width, const double fraction,
+                         const unsigned seed)
   {
     std::mt19937 rng(seed);
     std::bernoulli_distribution zero(fraction);
@@ -144,7 +145,7 @@ TEST_CASE("compressLinvB: Matrix_Normalizer and bigint_syrk_blas")
           = random_nonzero_columns(width, zero_fraction[b], seed);
         // Same matrix on all ranks of the group: generated on its root
         El::DistMatrix<El::BigFloat, El::CIRC, El::CIRC> root(heights[b],
-                                                             width, grid);
+                                                              width, grid);
         if(root.CrossRank() == root.Root())
           {
             root.Matrix() = Test_Util::random_matrix(heights[b], width);
@@ -162,8 +163,7 @@ TEST_CASE("compressLinvB: Matrix_Normalizer and bigint_syrk_blas")
 
     // per node
     const int total_height = num_groups * (7 + 20 + 3);
-    const auto num_primes
-      = Fmpz_Comb(bits, bits, 1, total_height).num_primes;
+    const auto num_primes = Fmpz_Comb(bits, bits, 1, total_height).num_primes;
     size_t max_shared_memory_bytes = 0;
     if(split == 1)
       max_shared_memory_bytes

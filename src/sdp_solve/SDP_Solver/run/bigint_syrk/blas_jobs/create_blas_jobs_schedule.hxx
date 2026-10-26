@@ -17,9 +17,9 @@
 // choice of the split factor, instead of its number of output elements
 // (sdpb --compressLinvB: the work on the nonzero column runs)
 Blas_Job_Schedule create_weighted_blas_job_schedule(
-  Blas_Job::Kind kind, El::UpperOrLowerNS::UpperOrLower uplo,
-  size_t num_ranks, size_t num_primes, El::Int output_matrix_height,
-  El::Int output_matrix_width, Verbosity verbosity,
+  Blas_Job::Kind kind, El::UpperOrLowerNS::UpperOrLower uplo, size_t num_ranks,
+  size_t num_primes, El::Int output_matrix_height, El::Int output_matrix_width,
+  Verbosity verbosity,
   const std::function<Blas_Job::Cost(const Blas_Job &)> &job_cost);
 
 Blas_Job_Schedule

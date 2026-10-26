@@ -362,8 +362,8 @@ SDP::free_var_block_columns(const size_t index,
   return result;
 }
 
-size_t SDP::LinvB_block_local_size(const size_t index,
-                                   const bool compressed) const
+size_t
+SDP::LinvB_block_local_size(const size_t index, const bool compressed) const
 {
   El::DistMatrix<El::BigFloat> shape(free_var_matrix.blocks.at(index).Grid());
   if(sparse_free_var_matrix)

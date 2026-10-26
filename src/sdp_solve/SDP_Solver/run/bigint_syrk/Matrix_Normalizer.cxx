@@ -74,9 +74,7 @@ namespace
   // Column of P held by global column j of a band (identity without a map;
   // -1 for a padding column)
   El::Int mapped_col(const std::vector<El::Int> *column_map, const int j)
-  {
-    return column_map == nullptr ? j : column_map->at(j);
-  }
+  { return column_map == nullptr ? j : column_map->at(j); }
 
   template <class TMatrix>
   void add_local_column_norms_squared(
@@ -98,8 +96,7 @@ namespace
       for(int jLoc = 0; jLoc < local_width(matrix); ++jLoc)
         {
           const auto &value = get_local_cref(matrix, iLoc, jLoc);
-          const El::Int j
-            = mapped_col(column_map, global_col(matrix, jLoc));
+          const El::Int j = mapped_col(column_map, global_col(matrix, jLoc));
           if(j < 0)
             continue;
           local_norms_squared.at(j) += value * value;

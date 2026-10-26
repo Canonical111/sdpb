@@ -41,8 +41,7 @@ boost::program_options::options_description Solver_Parameters::options()
     "results are unchanged; saves memory when B has many zeros.");
   result.add_options()(
     "compressLinvB",
-    boost::program_options::bool_switch(&compress_LinvB)
-      ->default_value(false),
+    boost::program_options::bool_switch(&compress_LinvB)->default_value(false),
     "Experimental: store L^{-1} B with only the columns where B has a "
     "nonzero element (the other columns are exactly zero). The arithmetic "
     "on the kept columns is unchanged; saves memory and work when B has "

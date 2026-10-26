@@ -26,9 +26,7 @@ namespace
     El::Int LocalHeight() const { return matrix.LocalHeight(); }
     // Column of matrix for window column j, or -1 (zero column)
     El::Int column(const El::Int j) const
-    {
-      return inverse == nullptr ? j : inverse->at(col_offset + j);
-    }
+    { return inverse == nullptr ? j : inverse->at(col_offset + j); }
     // Whether this rank writes window column j of this block
     bool IsLocalCol(const El::Int j) const
     {

@@ -60,8 +60,8 @@ void solve_schur_complement_equation(
                 El::Zeros(z, P.Width(), 1);
                 Gemv(El::OrientationNS::TRANSPOSE, El::BigFloat(-1), P,
                      dx.blocks[block], El::BigFloat(0), z);
-                const El::DistMatrix<El::BigFloat, El::STAR, El::STAR>
-                  z_star(z);
+                const El::DistMatrix<El::BigFloat, El::STAR, El::STAR> z_star(
+                  z);
                 for(int64_t row = 0; row < dy_block.LocalHeight(); ++row)
                   for(int64_t column = 0; column < dy_block.LocalWidth();
                       ++column)
@@ -128,7 +128,8 @@ void solve_schur_complement_equation(
           El::Zeros(dy_columns, P.Width(), 1);
           for(size_t k = 0; k < column_map.size(); ++k)
             if(column_map[k] >= 0)
-              dy_columns.SetLocal(k, 0, dy_local.GetLocalCRef(column_map[k], 0));
+              dy_columns.SetLocal(k, 0,
+                                  dy_local.GetLocalCRef(column_map[k], 0));
           Gemv(El::OrientationNS::NORMAL, El::BigFloat(1), P, dy_columns,
                El::BigFloat(1), dx.blocks[block]);
         }
