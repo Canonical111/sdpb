@@ -51,6 +51,10 @@
             },
             "minItems": 2,
             "maxItems": 2
+          },
+          "polynomialBasis": {
+            "description": "Written only for \"chebyshev\" (coefficients in T_i((2x-a-b)/(b-a)))",
+            "enum": ["chebyshev"]
           }
         }
       },

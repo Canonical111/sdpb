@@ -39,7 +39,9 @@ You can also use `--maxNumPoles` to downsample the PMP (see Section 4.3 in https
 By default, each block must be positive semidefinite for x >= 0. In JSON input, a block with
 `"domain": {"interval": ["a", "b"]}` is imposed on a <= x <= b instead, with the Markov-Lukacs weights
 (1 and (x-a)(b-x) for even degree, x-a and b-x for odd degree); see the
-[manual](SDPB_Manual/SDPB-Manual.pdf), Section 3.2. `spectrum` does not support such blocks yet.
+[manual](SDPB_Manual/SDPB-Manual.pdf), Section 3.2. With `"polynomialBasis": "chebyshev"` in `"domain"`, the
+coefficients are given in the Chebyshev polynomials T_i((2x-a-b)/(b-a)) instead of x^i, which keeps high degrees
+accurate at low precision. `spectrum` does not support such blocks yet.
 
 The single file Mathematica and JSON formats are described in Section
 3.2 of the [manual](SDPB_Manual/SDPB-Manual.pdf). In addition, for JSON there

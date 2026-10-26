@@ -244,7 +244,8 @@ TEST_CASE("pmp_interval")
     };
 
     {
-      INFO("Defaults: prefactor 1, Chebyshev points, sampled bases");
+      INFO("Defaults: prefactor 1, Chebyshev points, equilibrated scalings, "
+           "sampled bases");
       const auto pvm
         = make(std::nullopt, std::nullopt, std::nullopt, domain);
       REQUIRE(pvm.domain.is_interval());
@@ -255,8 +256,13 @@ TEST_CASE("pmp_interval")
       DIFF(pvm.sample_points,
            to_BigFloat_Vector(interval_sample_points(
              5, to_Boost_Float(domain.a()), to_Boost_Float(domain.b()))));
-      for(const auto &s : pvm.sample_scalings)
-        REQUIRE(s == El::BigFloat(1));
+      // s_k = 1 / max(|1 + x^4|, |x^2 + x^4/12|) = 1 / (1 + x^4)
+      for(size_t k = 0; k < 5; ++k)
+        {
+          const auto &x = pvm.sample_points.at(k);
+          DIFF(pvm.sample_scalings.at(k), 1 / (1 + x * x * x * x));
+        }
+      DIFF(pvm.reduced_sample_scalings, pvm.sample_scalings);
     }
     {
       INFO("Without a domain, the half-line defaults are unchanged");
@@ -295,5 +301,52 @@ TEST_CASE("pmp_interval")
     REQUIRE_THROWS(make(std::nullopt, std::nullopt,
                         std::vector<El::BigFloat>{0, 1, 1.5, 1.75, 2},
                         domain));
+  }
+
+  SECTION("Chebyshev polynomial basis")
+  {
+    auto domain = interval(El::BigFloat(1) / 2, 2);
+    domain.polynomial_basis = Polynomial_Basis::chebyshev;
+    // polynomials_1d() in T_i(u), u = (2x - 5/2)/(3/2), exact
+    Simple_Matrix<Polynomial_Vector> cheb(1, 1);
+    cheb(0, 0)
+      = {polynomial({El::BigFloat(12691) / 2048, El::BigFloat("7.44140625"),
+                     El::BigFloat("2.794921875"), El::BigFloat("0.52734375"),
+                     El::BigFloat("0.03955078125")}),
+         polynomial({El::BigFloat(55955) / 24576, El::BigFloat("2.4951171875"),
+                     El::BigFloat("0.51416015625"),
+                     El::BigFloat("0.0439453125"),
+                     El::BigFloat("0.0032958984375")})};
+    const auto mono = polynomials_1d();
+    {
+      INFO("Clenshaw evaluation equals the monomial form");
+      for(const El::BigFloat x :
+          {El::BigFloat(1) / 2, El::BigFloat(2), El::BigFloat(1),
+           El::BigFloat(3) / 4, El::BigFloat(19) / 10})
+        for(size_t n = 0; n < 2; ++n)
+          {
+            CAPTURE(x, n);
+            DIFF(domain.evaluate(cheb(0, 0).at(n), x), mono(0, 0).at(n)(x));
+          }
+    }
+    {
+      INFO("Same sample points and scalings as the monomial input");
+      const auto with_cheb
+        = Polynomial_Vector_Matrix(cheb, std::nullopt, std::nullopt,
+                                   std::nullopt, std::nullopt, std::nullopt,
+                                   std::nullopt, std::nullopt, domain);
+      const auto with_mono = Polynomial_Vector_Matrix(
+        mono, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, std::nullopt,
+        interval(El::BigFloat(1) / 2, 2));
+      DIFF(with_cheb.sample_points, with_mono.sample_points);
+      DIFF(with_cheb.sample_scalings, with_mono.sample_scalings);
+    }
+    {
+      INFO("chebyshev needs an interval");
+      Positivity_Domain half_line;
+      half_line.polynomial_basis = Polynomial_Basis::chebyshev;
+      REQUIRE_THROWS(half_line.validate());
+    }
   }
 }

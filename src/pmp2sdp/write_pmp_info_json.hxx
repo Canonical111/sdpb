@@ -44,6 +44,11 @@ inline void write_pmp_info_json(std::ostream &output_stream,
           writer.BigFloat(block.domain.a());
           writer.BigFloat(block.domain.b());
           writer.EndArray();
+          if(block.domain.polynomial_basis == Polynomial_Basis::chebyshev)
+            {
+              writer.Key("polynomialBasis");
+              writer.String("chebyshev");
+            }
           writer.EndObject();
         }
       writer.Key("prefactor");
@@ -165,16 +170,21 @@ inline void synchronize_pvm_info(PVM_Info &pvm_info, const int from)
           {
             El::mpi::Send(pvm_info.domain.a(), to, comm);
             El::mpi::Send(pvm_info.domain.b(), to, comm);
+            El::mpi::Send<int>(static_cast<int>(
+                                 pvm_info.domain.polynomial_basis),
+                               to, comm);
           }
       }
     if(rank == to)
       {
-        pvm_info.domain.interval.reset();
+        pvm_info.domain = Positivity_Domain{};
         if(El::mpi::Recv<int>(from, comm) != 0)
           {
             const auto a = El::mpi::Recv<El::BigFloat>(from, comm);
             const auto b = El::mpi::Recv<El::BigFloat>(from, comm);
             pvm_info.domain.interval.emplace(a, b);
+            pvm_info.domain.polynomial_basis
+              = static_cast<Polynomial_Basis>(El::mpi::Recv<int>(from, comm));
           }
       }
   }

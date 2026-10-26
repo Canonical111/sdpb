@@ -59,10 +59,13 @@ Dual_Constraint_Group::Dual_Constraint_Group(const size_t &Block_index,
             {
               const El::BigFloat &x = m.sample_points.at(k);
               const El::BigFloat &scale = m.sample_scalings.at(k);
-              constraint_constants[p] = scale * polys(r, c)[0](x);
+              // m.domain.evaluate: in the domain's polynomial basis
+              constraint_constants[p]
+                = scale * m.domain.evaluate(polys(r, c)[0], x);
               for(size_t n = 1; n < vectorDim; ++n)
                 {
-                  constraint_matrix.Set(p, n - 1, -scale * polys(r, c)[n](x));
+                  constraint_matrix.Set(
+                    p, n - 1, -scale * m.domain.evaluate(polys(r, c)[n], x));
                 }
               ++p;
             }

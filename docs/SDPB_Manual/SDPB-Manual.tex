@@ -152,7 +152,7 @@ See details in \texttt{docs/Usage.md}.
 	@\textrm{\em{(optional)}}@ "prefactor" | "DampedRational": @\repl{damped-rational prefactor}@,
 	@\textrm{\em{(optional)}}@ "reducedPrefactor": @\repl{damped-rational prefactor}@,
 	@\textrm{\em{(optional)}}@ "maxNumPoles": @\repl{maximal number of poles in reducedPrefactor}@,
-	@\textrm{\em{(optional)}}@ "domain": {"interval": ["$a_j$", "$b_j$"]},
+	@\textrm{\em{(optional)}}@ "domain": {"interval": ["$a_j$", "$b_j$"], @\textrm{\em{(optional)}}@ "polynomialBasis": "chebyshev"},
 	"polynomials": [
 		[@\repl{polynomial vector $Q^{n}_{j,11}(x)$}@, ... @\repl{polynomial vector $Q^{n}_{j,m_j1}(x)$}@],
 		...
@@ -231,6 +231,8 @@ On an interval:
 \begin{itemize}
 	\item the default prefactor is $\chi(x)=1$; a specified prefactor must be positive on $[a,b]$ (no poles in $[a,b]$, and an even number of poles above $b$), and its base may be any positive number;
 	\item default sample points are the Chebyshev nodes $x_k=\frac{a+b}{2}-\frac{b-a}{2}\cos\frac{\pi(2k+1)}{2(d_j+1)}$, $k=0,\dots,d_j$; specified sample points must lie in $[a,b]$;
+	\item if neither a prefactor nor sample scalings are specified, the sample scalings are $s_k=1/\max_{r,s,n}|Q^{n}_{j,rs}(x_k)|$, so that every constraint row has largest entry 1: the residuals compared with SDPB's thresholds, its initial point and its rounding errors then have the same scale at every point of $[a,b]$;
+	\item with \texttt{"polynomialBasis": "chebyshev"}, the coefficients of the polynomials (and of specified bilinear bases) are those of the Chebyshev polynomials $T_i\big((2x-a-b)/(b-a)\big)$ instead of $x^i$, and are evaluated by Clenshaw's recurrence. Monomial coefficients of a polynomial of size $O(1)$ on $[a,b]$ can grow like $(3+2\sqrt 2)^{d_j}$ (on $[0,1]$), and evaluating them at the sample points then loses as many digits; Chebyshev coefficients stay $O(1)$;
 	\item if no bilinear bases are specified, \texttt{pmp2sdp} samples bases orthonormal with respect to $\sum_k w_i(x_k)\, s_k \delta(x-x_k)dx$ directly at the sample points (built from Chebyshev polynomials of $(2x-a-b)/(b-a)$), without forming monomial coefficients;
 	\item \texttt{"reducedPrefactor"}, and \texttt{"maxNumPoles"} below the number of prefactor poles, are not supported.
 \end{itemize}

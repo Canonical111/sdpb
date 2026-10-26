@@ -234,8 +234,10 @@ TEST_CASE("end-to-end_tests")
     INFO("Same polynomials as 1d, positive on the interval [1/2, 2] "
          "(\"domain\": {\"interval\": [\"0.5\", \"2\"]}) instead of "
          "x >= 0.");
-    INFO("Default prefactor 1, Chebyshev sample points and bilinear bases "
-         "orthonormal at the sample points.");
+    INFO("Default prefactor 1, Chebyshev sample points, equilibrated sample "
+         "scalings and bilinear bases orthonormal at the sample points.");
+    INFO("pmp-chebyshev.json: the same polynomials in the Chebyshev basis of "
+         "[1/2, 2] (\"polynomialBasis\": \"chebyshev\"), same SDP.");
     INFO("The minimum of (1 + x^4) / (x^2 + x^4 / 12) is inside [1/2, 2], "
          "so the objective equals the one of 1d: 1.8402657631320492466880...");
     End_To_End_Test test("1d-interval");
@@ -248,6 +250,8 @@ TEST_CASE("end-to-end_tests")
     INFO("maximize (-y) s.t. (1 + x^3 + y * x) >= 0 on the interval [1, 2]: "
          "odd degree, weights x - 1 and 2 - x.");
     INFO("The optimum y = -2 is set by the endpoint x = 1.");
+    INFO("pmp-chebyshev.json: the same polynomials in the Chebyshev basis of "
+         "[1, 2], same SDP.");
     End_To_End_Test test("1d-interval-odd");
     test.num_procs = 2;
     test.run();

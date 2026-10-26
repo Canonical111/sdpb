@@ -4,6 +4,7 @@
 #include "sdpb_util/assert.hxx"
 
 #include <boost/math/constants/constants.hpp>
+#include <algorithm>
 #include <iterator>
 
 std::vector<Boost_Float>
@@ -64,7 +65,8 @@ namespace
   }
 
   // On an interval, the default prefactor is 1:
-  // the polynomials need no damping on a compact domain.
+  // the polynomials need no damping on a compact domain
+  // (and the default sample scalings are equilibrated, see above).
   Damped_Rational interval_prefactor_or_default(
     const std::optional<Damped_Rational> &prefactor_opt,
     const Positivity_Domain &domain)
@@ -121,6 +123,41 @@ namespace
       return sample_scalings_opt.value();
     return to_BigFloat_Vector(
       sample_scalings(to_Boost_Float_Vector(sample_points), damped_rational));
+  }
+
+  // Default sample scalings on an interval without prefactor and
+  // sampleScalings: s_k = 1 / max |P^{rs}_n(x_k)| over the entries and
+  // components of the block, so that every constraint row (c, B) at x_k has
+  // largest entry 1. Then the dual residuals that SDPB compares with its
+  // thresholds, its initial point Y = Omega I (in bilinear bases orthonormal
+  // at the points with these weights) and its rounding errors are on the same
+  // scale at every point of [a, b], whatever the size of the polynomials
+  // there. A row smaller than sqrt(epsilon) times the largest one (a common
+  // zero of the block) is scaled as if it were that size.
+  std::vector<El::BigFloat>
+  equilibrated_sample_scalings(const Simple_Matrix<Polynomial_Vector> &pvm,
+                               const std::vector<El::BigFloat> &sample_points,
+                               const Positivity_Domain &domain)
+  {
+    std::vector<El::BigFloat> row_size(sample_points.size(), 0);
+    for(size_t k = 0; k < sample_points.size(); ++k)
+      for(int i = 0; i < pvm.Height(); ++i)
+        for(int j = 0; j <= i; ++j)
+          for(const auto &polynomial : pvm(i, j))
+            row_size[k] = std::max(
+              row_size[k],
+              El::Abs(domain.evaluate(polynomial, sample_points[k])));
+
+    const El::BigFloat largest
+      = *std::max_element(row_size.begin(), row_size.end());
+    std::vector<El::BigFloat> scalings(sample_points.size(), 1);
+    if(largest == El::BigFloat(0))
+      return scalings;
+    const El::BigFloat floor
+      = largest * El::Sqrt(El::limits::Epsilon<El::BigFloat>());
+    for(size_t k = 0; k < sample_points.size(); ++k)
+      scalings[k] = 1 / std::max(row_size[k], floor);
+    return scalings;
   }
 
   // NB: result is truncated to (delta1+1, delta2+1)
@@ -234,8 +271,12 @@ Polynomial_Vector_Matrix::Polynomial_Vector_Matrix(
   sample_points = sample_points_or_default(
     sample_points_opt, reduced_prefactor, domain, num_points);
 
-  sample_scalings = sample_scalings_or_default(sample_scalings_opt,
-                                               this->sample_points, prefactor);
+  sample_scalings
+    = domain.is_interval() && !prefactor_opt.has_value()
+          && !sample_scalings_opt.has_value()
+        ? equilibrated_sample_scalings(polynomials, sample_points, domain)
+        : sample_scalings_or_default(sample_scalings_opt, this->sample_points,
+                                     prefactor);
 
   reduced_sample_scalings = [&] {
     if(reduced_sample_scalings_opt.has_value()

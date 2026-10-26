@@ -133,7 +133,8 @@ namespace
 // On [a, b], the Gram matrix Y_{parity+1} carries the weight w_parity(x):
 // the scalings of its rows are w_parity(x_k) s_k.
 // If bilinear_basis is empty (no user-supplied bases on [a, b]), the rows
-// are orthonormal at the sample points, see sample_orthonormal_basis().
+// are orthonormal at the sample points, see sample_orthonormal_basis();
+// otherwise they are the user's bases, evaluated in domain.polynomial_basis.
 std::array<El::Matrix<El::BigFloat>, 2>
 sample_bilinear_basis(const std::array<Polynomial_Vector, 2> &bilinear_basis,
                       const std::vector<El::BigFloat> &sample_points,
@@ -164,13 +165,24 @@ sample_bilinear_basis(const std::array<Polynomial_Vector, 2> &bilinear_basis,
                  DEBUG_STRING(domain.b()));
           weighted_scalings.push_back(weight * sample_scalings.at(k));
         }
-      bilinear_bases[parity]
-        = default_basis
-            ? sample_orthonormal_basis(basis_sizes[parity], sample_points,
-                                       weighted_scalings, domain.a(),
-                                       domain.b())
-            : sample_bilinear_basis(bilinear_basis[parity], sample_points,
-                                    weighted_scalings);
+      if(default_basis)
+        {
+          bilinear_bases[parity] = sample_orthonormal_basis(
+            basis_sizes[parity], sample_points, weighted_scalings, domain.a(),
+            domain.b());
+          continue;
+        }
+      // User-supplied bases, in the domain's polynomial basis
+      const auto &basis = bilinear_basis[parity];
+      auto &sampled = bilinear_bases[parity];
+      sampled.Resize(basis.size(), sample_points.size());
+      for(size_t k = 0; k < sample_points.size(); ++k)
+        {
+          const auto scale = El::Sqrt(weighted_scalings.at(k));
+          for(size_t i = 0; i < basis.size(); ++i)
+            sampled.Set(i, k,
+                        scale * domain.evaluate(basis.at(i), sample_points[k]));
+        }
     }
   return bilinear_bases;
 }
