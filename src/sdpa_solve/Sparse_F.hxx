@@ -85,11 +85,15 @@ namespace Sdpb::Sdpa
                                 const std::vector<Sparse_F_Entry> &entries,
                                 El::DistMatrix<El::BigFloat> &result)
   {
+    const El::BigFloat one(1);
     for(const auto &e : entries)
       {
         if(result.IsLocal(e.row, e.col))
+          // one * (...) reproduces El::Axpy's 1*x elementwise stage, whose GMP
+          // destination state rounds the contribution exactly as the dense
+          // path's += did.
           result.UpdateLocal(result.LocalRow(e.row), result.LocalCol(e.col),
-                             e.value * a);
+                             one * (e.value * a));
       }
   }
 
