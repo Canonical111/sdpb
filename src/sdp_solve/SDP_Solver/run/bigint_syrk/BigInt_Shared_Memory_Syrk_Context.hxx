@@ -103,6 +103,9 @@ public:
   void restore_band_accumulation(
     const std::function<void(El::Int, El::Int, const Fmpz_BigInt &)> &callback,
     Timers &timers);
+  // Streaming (PMP solver): ceil(log2) of each column norm of P = L^{-1} B in the
+  // previous iteration, the next scaling prediction (empty before the first Q).
+  std::vector<El::Int> band_column_exponents;
   // Seconds spent in accumulate_band() since the last begin_band_accumulation().
   struct Band_Accumulation_Profile
   {

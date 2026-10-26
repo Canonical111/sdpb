@@ -128,10 +128,14 @@ size_t Bigint_Syrk_Config::node_local_bytes() const
   const size_t normalizer_size = input_width * shared_memory_comm.Size();
   // Conservative estimate for mpi::AllReduce(column_norms) overhead
   const size_t normalizer_all_reduce_size = 3 * normalizer_size;
+  // #184: band accumulation keeps Q's upper triangle as 4-byte residues.
+  const size_t accumulator_bytes
+    = full_width_input ? output_dim * (output_dim + 1) / 2 * num_primes() * 4 : 0;
   return bigfloat_bytes(precision)
-         * (normalizer_size
-            + std::max(normalizer_all_reduce_size,
-                       get_reduce_scatter_buffer_size()));
+           * (normalizer_size
+              + std::max(normalizer_all_reduce_size,
+                         get_reduce_scatter_buffer_size()))
+         + accumulator_bytes;
 }
 size_t Bigint_Syrk_Config::node_shmem_bytes() const
 {

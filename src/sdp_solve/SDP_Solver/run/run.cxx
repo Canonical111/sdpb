@@ -1,6 +1,7 @@
 #include "save_c_minus_By.hxx"
 #include "sdp_solve/memory_estimates.hxx"
 #include "bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
+#include "bigint_syrk/streaming_syrk.hxx"
 #include "get_syrk_Q_config.hxx"
 #include "sdp_solve/SDP_Solver.hxx"
 #include "sdpb_util/ostream/pretty_print_bytes.hxx"
@@ -148,13 +149,25 @@ namespace
     SDP_Solver_run_bytes += schur_complement_cholesky_bytes;
 
     // schur_off_diagonal = L^{-1} B
-    SDP_Solver_run_bytes += B_bytes;
+    // #184: streaming (SDPB_STREAM_P, single node) holds L_j^{-1} B_j for a block or two
+    // at a time instead (a few more on a rank of small blocks, as the panels run ahead of
+    // the bands); its accumulator is counted in the syrk config's local bytes.
+    const bool streaming
+      = Streaming_Syrk::enabled() && block_info.num_nodes() == 1;
+    const size_t max_B_block_bytes = node_reduce([&] {
+      size_t bytes = 0;
+      for(const auto &block : sdp.free_var_matrix.blocks)
+        bytes = std::max(bytes, get_allocated_bytes(block));
+      return bytes;
+    }());
+    SDP_Solver_run_bytes += streaming ? 2 * max_B_block_bytes : B_bytes;
     // Q = NxN
     SDP_Solver_run_bytes += Q_bytes;
 
     const auto cfg = get_syrk_Q_config(
       block_info, sdp, parameters.max_memory, parameters.max_shared_memory,
-      mem_required_bytes() + std::max(schur_complement_bytes, 3 * X_bytes));
+      mem_required_bytes() + std::max(schur_complement_bytes, 3 * X_bytes),
+      streaming);
 
     // Add schur_complement + (syrk_S() or Trsm() temporary allocations)
     // from initialize_schur_complement_solver()

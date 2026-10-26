@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
+#include "bigint_syrk/streaming_syrk.hxx"
 #include "sdp_solve/Block_Info.hxx"
 #include "sdp_solve/SDP.hxx"
 #include "sdp_solve/Solver_Parameters/Memory_Limit.hxx"
@@ -10,9 +11,13 @@ inline Bigint_Syrk_Config
 get_syrk_Q_config(const Block_Info &block_info, const SDP &sdp,
                   const Memory_Limit &max_memory,
                   const Memory_Limit &max_shared_memory,
-                  const size_t other_memory)
+                  const size_t other_memory, const bool streaming = false)
 {
-  const auto precision = El::gmp::Precision();
+  // #184: streaming Q (single node) needs primes for Streaming_Syrk::extra_bits more per
+  // factor and one full-width input window (streaming_syrk.hxx).
+  const bool full_width_input = streaming && block_info.num_nodes() == 1;
+  const auto precision
+    = El::gmp::Precision() + (full_width_input ? Streaming_Syrk::extra_bits : 0);
   const auto num_nodes = block_info.num_nodes();
   const auto &node_comm = block_info.node_comm;
 
@@ -40,7 +45,8 @@ get_syrk_Q_config(const Block_Info &block_info, const SDP &sdp,
     = [&](const size_t input_split_factor, const size_t output_split_factor) {
         return Bigint_Syrk_Config(node_comm, precision, num_nodes,
                                   blocks_height_per_group, block_width,
-                                  input_split_factor, output_split_factor);
+                                  input_split_factor, output_split_factor,
+                                  full_width_input);
       };
 
   const size_t max_input_split_factor = max_group_height;

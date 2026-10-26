@@ -52,7 +52,7 @@ void compute_schur_complement(
 
 void compute_Q(const Environment &env, const SDP &sdp,
                const Block_Info &block_info,
-               const Block_Diagonal_Matrix &schur_complement,
+               Block_Diagonal_Matrix &schur_complement,
                Block_Matrix &schur_off_diagonal,
                Block_Diagonal_Matrix &schur_complement_cholesky,
                BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,

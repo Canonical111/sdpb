@@ -1,5 +1,8 @@
 #include "sdp_solve/SDP_Solver.hxx"
+#include "sdpb_util/assert.hxx"
 #include "sdpb_util/copy_matrix.hxx"
+
+#include <optional>
 
 // Solve the Schur complement equation for dx, dy.
 //
@@ -11,13 +14,26 @@
 // The equation is solved using the block-decomposition described in
 // the manual.
 //
+// #184: with streaming (SDPB_STREAM_P) schur_off_diagonal = L^{-1} B is not stored
+// (empty), and its two products are formed from B and L instead:
+//   (L^{-1} B)^T u = B^T (L^{-T} u),   (L^{-1} B) w = L^{-1} (B w).
 void solve_schur_complement_equation(
   const Block_Diagonal_Matrix &schur_complement_cholesky,
-  const Block_Matrix &schur_off_diagonal,
+  const Block_Matrix &schur_off_diagonal, const Block_Matrix &free_var_matrix,
   const El::DistMatrix<El::BigFloat> &Q, Block_Vector &dx, Block_Vector &dy)
 {
+  const bool streaming = schur_off_diagonal.blocks.empty();
+  const auto &off_diagonal = streaming ? free_var_matrix : schur_off_diagonal;
+
   // dx = schur_complement^{-1}.dx
   lower_triangular_solve(schur_complement_cholesky, dx);
+  // Streaming: v = L^{-T} dx, so that B^T v = (L^{-1} B)^T dx.
+  std::optional<Block_Vector> v;
+  if(streaming)
+    {
+      v.emplace(dx);
+      lower_triangular_transpose_solve(schur_complement_cholesky, *v);
+    }
 
   El::DistMatrix<El::BigFloat> dy_dist;
   Zeros(dy_dist, Q.Height(), 1);
@@ -25,11 +41,12 @@ void solve_schur_complement_equation(
     El::Matrix<El::BigFloat> dy_sum;
     Zeros(dy_sum, Q.Height(), 1);
 
-    for(size_t block = 0; block < schur_off_diagonal.blocks.size(); ++block)
+    for(size_t block = 0; block < off_diagonal.blocks.size(); ++block)
       {
         Gemv(El::OrientationNS::TRANSPOSE, El::BigFloat(-1),
-             schur_off_diagonal.blocks[block], dx.blocks[block],
-             El::BigFloat(1), dy.blocks[block]);
+             off_diagonal.blocks[block],
+             streaming ? v->blocks[block] : dx.blocks[block], El::BigFloat(1),
+             dy.blocks[block]);
 
         // Locally sum contributions to dy
         for(int64_t row = 0; row < dy.blocks[block].LocalHeight(); ++row)
@@ -64,14 +81,36 @@ void solve_schur_complement_equation(
   El::DistMatrix<El::BigFloat, El::STAR, El::STAR> dy_local(dy_dist);
 
   // dx += schur_off_diagonal.dy
-  for(size_t block = 0; block < schur_off_diagonal.blocks.size(); ++block)
+  // (streaming: v = B.dy, v = L^{-1} v, dx += v)
+  for(size_t block = 0; block < off_diagonal.blocks.size(); ++block)
     {
       copy_matrix(dy_local, dy.blocks[block]);
       Gemv(El::OrientationNS::NORMAL, El::BigFloat(1),
-           schur_off_diagonal.blocks[block], dy.blocks[block], El::BigFloat(1),
-           dx.blocks[block]);
+           off_diagonal.blocks[block], dy.blocks[block],
+           El::BigFloat(streaming ? 0 : 1),
+           streaming ? v->blocks[block] : dx.blocks[block]);
+    }
+  if(streaming)
+    {
+      lower_triangular_solve(schur_complement_cholesky, *v);
+      for(size_t block = 0; block < dx.blocks.size(); ++block)
+        El::Axpy(El::BigFloat(1), v->blocks[block], dx.blocks[block]);
     }
 
   // dx = schur_complement^{-T}.dx
   lower_triangular_transpose_solve(schur_complement_cholesky, dx);
+}
+
+// For callers that always store L^{-1} B (approx_objective, whose syrk config never
+// streams).
+void solve_schur_complement_equation(
+  const Block_Diagonal_Matrix &schur_complement_cholesky,
+  const Block_Matrix &schur_off_diagonal,
+  const El::DistMatrix<El::BigFloat> &Q, Block_Vector &dx, Block_Vector &dy)
+{
+  ASSERT(!schur_off_diagonal.blocks.empty(),
+         "schur_off_diagonal is empty: streaming needs free_var_matrix");
+  solve_schur_complement_equation(schur_complement_cholesky,
+                                  schur_off_diagonal, schur_off_diagonal, Q,
+                                  dx, dy);
 }

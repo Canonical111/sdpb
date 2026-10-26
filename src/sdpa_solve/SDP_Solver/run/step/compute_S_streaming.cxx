@@ -21,6 +21,7 @@
 #include "Compute_S_Context.hxx"
 #include "sdp_solve/Block_Matrix/Block_Matrix.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/Matrix_Normalizer.hxx"
+#include "sdp_solve/SDP_Solver/run/bigint_syrk/streaming_syrk.hxx"
 #include "sdpa_solve/SDP.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
@@ -39,8 +40,7 @@ namespace Sdpb::Sdpa
 {
   bool stream_S_enabled()
   {
-    const char *value = std::getenv("SDPB_STREAM_P");
-    return value != nullptr && std::string(value) != "0";
+    return Streaming_Syrk::enabled();
   }
 
   namespace
@@ -91,13 +91,7 @@ namespace Sdpb::Sdpa
       return bands;
     }
 
-    void mul_2exp(mpf_ptr x, const long shift)
-    {
-      if(shift >= 0)
-        mpf_mul_2exp(x, x, static_cast<mp_bitcnt_t>(shift));
-      else
-        mpf_div_2exp(x, x, static_cast<mp_bitcnt_t>(-shift));
-    }
+    using Streaming_Syrk::mul_2exp;
 
     // Exponent e with |x| < 2^e (x != 0).
     long upper_exponent(mpf_srcptr x)
@@ -327,71 +321,6 @@ namespace Sdpb::Sdpa
       mpf_clear(acc);
       mpz_clear(z);
     }
-
-    // Squared norm of one column of P, summed band by band as d^2 2^(2e) (x = d 2^e)
-    // relative to the largest exponent seen: any range, ~double accuracy.
-    struct Column_Norm
-    {
-      double sum = 0;
-      long exp = std::numeric_limits<long>::min();
-
-      void add(mpf_srcptr x)
-      {
-        long e;
-        const double d = mpf_get_d_2exp(&e, x);
-        if(d == 0)
-          return;
-        if(e > exp)
-          {
-            sum = exp == std::numeric_limits<long>::min()
-                    ? 0
-                    : std::ldexp(sum, static_cast<int>(
-                                        2 * std::max(exp - e, -4096L)));
-            exp = e;
-          }
-        sum += std::ldexp(d * d,
-                          static_cast<int>(2 * std::max(e - exp, -4096L)));
-      }
-    };
-
-    // log2 of the global column norms (-inf for zero columns).
-    std::vector<double> global_log2_norms(std::vector<Column_Norm> &norms)
-    {
-      const size_t m = norms.size();
-      std::vector<El::Int> exps(m);
-      for(size_t p = 0; p < m; ++p)
-        exps[p] = norms[p].sum == 0 ? std::numeric_limits<El::Int>::min()
-                                    : static_cast<El::Int>(norms[p].exp);
-      El::mpi::AllReduce(exps.data(), static_cast<int>(m), El::mpi::MAX,
-                         El::mpi::COMM_WORLD);
-      std::vector<double> sums(m, 0.0);
-      for(size_t p = 0; p < m; ++p)
-        if(norms[p].sum != 0)
-          sums[p] = std::ldexp(
-            norms[p].sum,
-            static_cast<int>(2 * std::max<El::Int>(norms[p].exp - exps[p],
-                                                   -4096)));
-      El::mpi::AllReduce(sums.data(), static_cast<int>(m), El::mpi::SUM,
-                         El::mpi::COMM_WORLD);
-      std::vector<double> result(m);
-      for(size_t p = 0; p < m; ++p)
-        result[p] = sums[p] == 0
-                      ? -std::numeric_limits<double>::infinity()
-                      : static_cast<double>(exps[p]) + 0.5 * std::log2(sums[p]);
-      return result;
-    }
-
-    // E_p = ceil(log2 norm_p): the norm then lies in (2^(E_p-1), 2^E_p].
-    std::vector<El::Int>
-    exponents_from_log2_norms(const std::vector<double> &log2_norms)
-    {
-      std::vector<El::Int> exponents(log2_norms.size(), 0);
-      for(size_t p = 0; p < log2_norms.size(); ++p)
-        if(std::isfinite(log2_norms[p]))
-          exponents[p] = static_cast<El::Int>(std::ceil(log2_norms[p]));
-      return exponents;
-    }
-
   }
 
   void compute_S_streaming(const SDP &sdp, const Block_Info &block_info,
@@ -470,153 +399,39 @@ namespace Sdpb::Sdpa
 
     if(syrk_context.can_accumulate_bands(S))
       {
-        // One column scaling for all bands: entry (r, p) enters the syrk as the integer
-        // trunc(P(r,p) 2^(bits + extra - E_p)), so the residues of all bands add up and S
-        // is restored once. E_p is ceil(log2) of the previous iteration's norm of column p;
-        // this iteration's exact norms are summed on the way. The syrk primes cover
-        // 2(bits + extra) bits plus headroom, so the scaling is exact (no overflow, no
-        // fewer bits than the default path's exact normalization) while
-        //   -extra <= log2(norm_p) - E_p <= max_log2_ratio   for every column.
-        // Otherwise the pass is repeated with E from the norms just computed, which
-        // always fit. The first iteration has no prediction and runs a norm-only pass.
-        constexpr int extra = stream_S_extra_bits;
-        const double max_log2_ratio
-          = (static_cast<double>(syrk_context.primes_product_bits()) - 3
-             - 2.0 * (static_cast<double>(bits) + extra))
-            / 2;
-        ASSERT(max_log2_ratio >= 2, "SDPB_STREAM_P: syrk primes leave no headroom",
-               DEBUG_STRING(syrk_context.primes_product_bits()),
-               DEBUG_STRING(bits));
-
-        std::chrono::duration<double> t_rows{0}, t_scale{0}, t_syrk{0},
-          t_restore{0};
-        // S is needed only for the restore: lay out the accumulator for S's
-        // distribution, then free S's storage until then.
-        syrk_context.begin_band_accumulation(S);
-        S.Empty();
-        size_t syrk_passes = 0;
-        // with_syrk = false: norms only.
-        const auto pass = [&](const bool with_syrk) -> std::vector<double> {
-          std::vector<Column_Norm> norms(m);
-          if(with_syrk && ++syrk_passes > 1)
-            syrk_context.reset_band_accumulation();
-          for(size_t t = 0; t < num_iterations; ++t)
-            {
-              Timers band_timers;
-              Block_Matrix band;
-              const auto t0 = clock::now();
-              fill_band(t, band);
-              const auto t1 = clock::now();
-              for(auto &block : band.blocks)
-                {
-                  auto &local = block.Matrix();
-                  for(El::Int jLoc = 0; jLoc < local.Width(); ++jLoc)
-                    {
-                      const El::Int p = block.GlobalCol(jLoc);
-                      const long shift
-                        = static_cast<long>(bits) + extra
-                          - static_cast<long>(with_syrk ? column_exponents[p]
-                                                        : 0);
-                      for(El::Int iLoc = 0; iLoc < local.Height(); ++iLoc)
-                        {
-                          auto *x = local(iLoc, jLoc).gmp_float.get_mpf_t();
-                          norms[p].add(x);
-                          if(with_syrk)
-                            mul_2exp(x, shift);
-                        }
-                    }
-                }
-              const auto t2 = clock::now();
-              if(with_syrk)
-                syrk_context.accumulate_band(band.blocks, band_timers,
-                                             block_timings_ms);
-              t_rows += t1 - t0;
-              t_scale += t2 - t1;
-              t_syrk += clock::now() - t2;
-            }
-          return global_log2_norms(norms);
-        };
-
         Scoped_Timer bands_timer(timers, "bands");
-        size_t passes = 0;
-        if(column_exponents.size() != m)
-          {
-            column_exponents = exponents_from_log2_norms(pass(false));
-            ++passes;
-          }
-        std::vector<double> log2_norms;
-        double lowest = 0, highest = 0;
-        while(true)
-          {
-            log2_norms = pass(true);
-            ++passes;
-            lowest = std::numeric_limits<double>::infinity();
-            highest = -lowest;
-            for(size_t p = 0; p < m; ++p)
-              if(std::isfinite(log2_norms[p]))
-                {
-                  const double r
-                    = log2_norms[p] - static_cast<double>(column_exponents[p]);
-                  lowest = std::min(lowest, r);
-                  highest = std::max(highest, r);
-                }
-            if(highest <= max_log2_ratio && lowest >= -extra)
-              break;
-            ASSERT(passes < 4, "SDPB_STREAM_P: column scaling does not settle",
-                   DEBUG_STRING(lowest), DEBUG_STRING(highest));
-            column_exponents = exponents_from_log2_norms(log2_norms);
-          }
-
-        // The L copies are no longer needed; free them before the restore.
-        Linv.clear();
-        Linv.shrink_to_fit();
-        Linv_fixed.clear();
-        Linv_fixed.shrink_to_fit();
-        const auto t0 = clock::now();
-        S.Resize(m, m);
-        El::Zero(S);
-        El::BigFloat value;
-        syrk_context.restore_band_accumulation(
-          [&](const El::Int i, const El::Int j, const Fmpz_BigInt &bigint) {
-            bigint.to_BigFloat(value);
-            auto *v = value.gmp_float.get_mpf_t();
-            if(i == j && std::isfinite(log2_norms[i]))
-              {
-                // S(i,i) is the squared norm summed above, in units of 2^(2(bits+extra)-2E_i).
-                long e;
-                const double d = mpf_get_d_2exp(&e, v);
-                const double expected
-                  = 2 * (log2_norms[i] - static_cast<double>(column_exponents[i])
-                         + bits + extra);
-                ASSERT(d > 0 && std::abs(std::log2(d) + e - expected) < 1e-6,
-                       "streaming S diagonal disagrees with the column norm",
-                       DEBUG_STRING(i), DEBUG_STRING(e), DEBUG_STRING(expected));
-              }
-            mul_2exp(v, static_cast<long>(column_exponents[i]
-                                          + column_exponents[j])
-                          - 2 * (static_cast<long>(bits) + extra));
-            S.SetLocal(S.LocalRow(i), S.LocalCol(j), value);
+        Streaming_Syrk::Profile profile;
+        Streaming_Syrk::syrk(
+          syrk_context, num_iterations,
+          [&](const size_t t, std::vector<El::DistMatrix<El::BigFloat>> &blocks) {
+            Block_Matrix band;
+            fill_band(t, band);
+            blocks = std::move(band.blocks);
           },
-          timers);
-        t_restore += clock::now() - t0;
-        // Prediction for the next iteration.
-        column_exponents = exponents_from_log2_norms(log2_norms);
-
+          [&] {
+            // The L copies are no longer needed; free them before the restore.
+            Linv.clear();
+            Linv.shrink_to_fit();
+            Linv_fixed.clear();
+            Linv_fixed.shrink_to_fit();
+          },
+          column_exponents, S, block_timings_ms, profile);
         if(print_profile && El::mpi::Rank(El::mpi::COMM_WORLD) == 0)
           {
             const auto &sp = syrk_context.band_accumulation_profile;
-            El::Output("S_stream: ", num_iterations, " bands, ", passes,
-                       " passes; rows ", t_rows.count(), " s, scale ",
-                       t_scale.count(), " s, syrk ", t_syrk.count(),
+            El::Output("S_stream: ", num_iterations, " bands, ", profile.passes,
+                       " passes; rows ", profile.produce.count(), " s, scale ",
+                       profile.scale.count(), " s, syrk ", profile.syrk.count(),
                        " s (last pass: residues ", sp.residues, ", clear ",
                        sp.clear, ", blas ", sp.blas, ", reduce ", sp.reduce,
-                       "), restore ", t_restore.count(),
-                       " s; log2(norm/2^E) in [", lowest, ", ", highest, "]");
+                       "), restore ", profile.restore.count(),
+                       " s; log2(norm/2^E) in [", profile.lowest, ", ",
+                       profile.highest, "]");
           }
         return;
       }
 
-    // Fallback (several nodes, or output split > 2): each band is normalized on its own
+    // Fallback (several nodes): each band is normalized on its own
     // and restored into S separately.
     // On a single node, band contributions are restored straight into S (no second
     // m x m matrix); across nodes the residues must be reduced first, via S_band.

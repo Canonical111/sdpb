@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
+#include "sdp_solve/SDP_Solver/run/bigint_syrk/streaming_syrk.hxx"
 #include "sdpa_solve/Block_Info.hxx"
 #include "sdpa_solve/SDP_Solver/run/step/Initialize_P_Context.hxx"
 #include "Solver_Run_Config.hxx"
@@ -12,10 +13,8 @@ namespace Sdpb::Sdpa
   // #184: SDPB_STREAM_P=1 forms S band by band without P (compute_S_streaming.cxx);
   // the trmm windows of the default path are then never allocated.
   bool stream_S_enabled();
-  // Streaming scales every band's columns by a predicted power of two; its syrk primes
-  // cover this many extra bits per factor, so a prediction that overshoots a column
-  // norm by up to 2^12 keeps all the bits of the exact normalization.
-  constexpr int stream_S_extra_bits = 12;
+  // Extra bits per factor covered by the streaming syrk's primes (streaming_syrk.hxx).
+  constexpr int stream_S_extra_bits = Streaming_Syrk::extra_bits;
 
   struct Compute_S_Context
   {
