@@ -12,19 +12,17 @@ El::BigFloat min_eigenvalue(Block_Diagonal_Matrix &A)
   for(auto &block : A.blocks)
     {
       El::DistMatrix<El::BigFloat, El::VR, El::STAR> eigenvalues(block.Grid());
-      /// There is a bug in El::HermitianEig when there is more than
-      /// one level of recursion when computing eigenvalues.  One fix
-      /// is to increase the cutoff so that there is no more than one
-      /// level of recursion.
-
-      /// An alternate workaround is to compute both eigenvalues and
-      /// eigenvectors, but that seems to be significantly slower.
+      /// Eigenvalues of the tridiagonal matrix by the implicit QR
+      /// algorithm. The default divide-and-conquer algorithm needed
+      /// workarounds (a cutoff allowing one level of recursion, many
+      /// secular-equation iterations) and still divided by zero in its
+      /// merge step for some blocks: GMP then raises SIGFPE and SDPB
+      /// aborts. This happened in a few iterations of degree-140 and
+      /// degree-200 polynomial blocks on an interval (bootstrap-speed
+      /// #185). Only eigenvalues are needed here, which QR computes in
+      /// O(n^2) operations after the tridiagonal reduction.
       El::HermitianEigCtrl<El::BigFloat> hermitian_eig_ctrl;
-      hermitian_eig_ctrl.tridiagEigCtrl.dcCtrl.cutoff = block.Height() / 2 + 1;
-
-      /// The default number of iterations is 40.  That is sometimes
-      /// not enough, so we bump it up significantly.
-      hermitian_eig_ctrl.tridiagEigCtrl.dcCtrl.secularCtrl.maxIterations = 16384;
+      hermitian_eig_ctrl.tridiagEigCtrl.alg = El::HERM_TRIDIAG_EIG_QR;
       El::HermitianEig(El::UpperOrLowerNS::LOWER, block, eigenvalues,
                        hermitian_eig_ctrl);
       local_min = El::Min(local_min, El::Min(eigenvalues));
