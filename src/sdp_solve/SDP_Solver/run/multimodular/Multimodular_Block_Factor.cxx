@@ -127,6 +127,40 @@ namespace
 
     int Rank() const { return rank; }
 
+    // #184: free the n x n structs; matrix, publish() and pull() are then unusable,
+    // and the values are read with value() and rows_structs().
+    void release_structs()
+    {
+      matrix.Empty();
+      ::operator delete(structs);
+      structs = nullptr;
+    }
+    bool has_structs() const { return structs != nullptr; }
+    // The value at (i, j), i >= j
+    __mpf_struct value(const int i, const int j)
+    { return array.view(index(i, j)); }
+    // Structs of rows [r0, r1) x columns [0, r1), column-major with height
+    // r1 - r0, as in matrix (the strictly upper part points to a dummy zero)
+    void rows_structs(const int r0, const int r1, std::vector<__mpf_struct> &out)
+    {
+      const int height = r1 - r0;
+      out.resize(size_t(height) * r1);
+      for(int j = 0; j < r1; ++j)
+        for(int i = r0; i < r1; ++i)
+          {
+            __mpf_struct &s = out[(i - r0) + size_t(j) * height];
+            if(i >= j)
+              s = array.view(index(i, j));
+            else
+              {
+                s._mp_prec = 1;
+                s._mp_size = 0;
+                s._mp_exp = 0;
+                s._mp_d = dummy;
+              }
+          }
+    }
+
     void publish(const int i, const int j)
     { array.publish(index(i, j), *element(i, j)); }
     void pull(const int i, const int j)
@@ -519,10 +553,16 @@ namespace
 
 struct Multimodular_Block_Factor::Storage
 {
+  int n = 0;
   std::unique_ptr<Shared_Lower_Matrix> shared;
   std::unique_ptr<Lower_BigFloat_Matrix> local;
   El::Matrix<El::BigFloat> &L()
-  { return shared ? shared->matrix : local->matrix; }
+  {
+    ASSERT(!shared || shared->has_structs(), "the factor's structs were released");
+    return shared ? shared->matrix : local->matrix;
+  }
+  // shared, after release_lower()
+  bool released() const { return shared && !shared->has_structs(); }
 };
 
 Multimodular_Block_Factor::Multimodular_Block_Factor(
@@ -531,6 +571,7 @@ Multimodular_Block_Factor::Multimodular_Block_Factor(
     : storage(std::make_unique<Storage>()), config(config)
 {
   ASSERT_EQUAL(schur.Height(), schur.Width());
+  storage->n = schur.Height();
   const El::mpi::Comm &comm = schur.Grid().Comm();
   if(allow_shared && on_one_node(comm))
     storage->shared
@@ -546,6 +587,51 @@ bool Multimodular_Block_Factor::shared() const
 
 const El::Matrix<El::BigFloat> &Multimodular_Block_Factor::lower() const
 { return storage->L(); }
+
+void Multimodular_Block_Factor::release_lower()
+{
+  if(shared())
+    storage->shared->release_structs();
+}
+
+void Multimodular_Block_Factor::lower_rows(const int r0, const int r1,
+                                           Lower_Rows &rows)
+{
+  if(storage->released())
+    {
+      static_assert(sizeof(El::BigFloat) == sizeof(__mpf_struct),
+                    "El::BigFloat must be a bare mpf");
+      storage->shared->rows_structs(r0, r1, rows.structs);
+      rows.matrix.LockedAttach(
+        r1 - r0, r1,
+        reinterpret_cast<const El::BigFloat *>(rows.structs.data()), r1 - r0);
+    }
+  else
+    El::LockedView(rows.matrix, storage->L(), El::IR(r0, r1), El::IR(0, r1));
+}
+
+void Multimodular_Block_Factor::copy_lower(
+  El::DistMatrix<El::BigFloat> &cholesky)
+{
+  const int n = storage->n;
+  cholesky.Resize(n, n);
+  auto &local = cholesky.Matrix();
+  for(int jLoc = 0; jLoc < cholesky.LocalWidth(); ++jLoc)
+    for(int iLoc = 0; iLoc < cholesky.LocalHeight(); ++iLoc)
+      {
+        const int i = cholesky.GlobalRow(iLoc), j = cholesky.GlobalCol(jLoc);
+        if(i < j)
+          continue;
+        auto *x = local.Ref(iLoc, jLoc).gmp_float.get_mpf_t();
+        if(storage->released())
+          {
+            const __mpf_struct v = storage->shared->value(i, j);
+            mpf_set(x, &v);
+          }
+        else
+          mpf_set(x, storage->L().CRef(i, j).gmp_float.get_mpf_t());
+      }
+}
 
 void Multimodular_Block_Factor::cholesky(
   const El::DistMatrix<El::BigFloat> &schur,

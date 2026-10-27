@@ -6,6 +6,7 @@
 #include <El.hpp>
 
 #include <memory>
+#include <vector>
 
 // Multimodular Cholesky factor of one Schur complement block S (an n x n
 // DistMatrix on its grid), and the solve P = L^{-1} B with it, as
@@ -37,8 +38,23 @@ public:
   // B := L^{-1} B (B on the same grid as schur)
   void solve(El::DistMatrix<El::BigFloat> &B, Timers &timers);
   // The lower triangle of L, whole, as this rank sees it (after cholesky()).
-  // #184: streaming Q solves this rank's columns of L^{-1} B against it panel by panel.
   const El::Matrix<El::BigFloat> &lower() const;
+
+  // #184, streaming Q: each rank solves its columns of L^{-1} B panel by panel against
+  // rows [r0, r1) x columns [0, r1) of L (rows.matrix, after cholesky()).
+  struct Lower_Rows
+  {
+    El::Matrix<El::BigFloat> matrix;
+    std::vector<__mpf_struct> structs; // matrix's storage after release_lower()
+  };
+  void lower_rows(int r0, int r1, Lower_Rows &rows);
+  // #184: a shared factor's lower() is n x n mpf structs on every rank, pointing into
+  // the window: more memory per block than the window's one copy of the limbs. Free
+  // them; lower() is then unusable, lower_rows() and copy_lower() build their own.
+  void release_lower();
+  // The lower triangle of cholesky := L (resized to n x n; the strictly upper
+  // triangle is left as is).
+  void copy_lower(El::DistMatrix<El::BigFloat> &cholesky);
 
   bool shared() const;
 

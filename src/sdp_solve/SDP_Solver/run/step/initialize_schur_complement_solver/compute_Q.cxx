@@ -314,19 +314,24 @@ void syrk_Q_streaming(
                           B.blocks.at(block).Grid());
                         *T = sdp.free_var_block(block, B_scratch);
                       }
-                    const auto &factor = multimodular_factors.at(block);
-                    const El::Matrix<El::BigFloat> &L_local
-                      = factor ? factor->lower() : L.LockedMatrix();
+                    // L[r0:r1, 0:r1]: the factor's, or the block's local matrix
+                    Multimodular_Block_Factor::Lower_Rows L_rows;
+                    if(const auto &factor = multimodular_factors.at(block))
+                      factor->lower_rows(r0, r1, L_rows);
+                    else
+                      El::LockedView(L_rows.matrix, L.LockedMatrix(), rows,
+                                     El::IR(0, r1));
+                    const El::IR panel_rows(0, r1 - r0);
                     auto &X = T->Matrix();
                     El::Matrix<El::BigFloat> panel;
                     El::View(panel, X, rows, El::ALL);
                     if(r0 > 0)
                       multimodular_gemm_sub(
-                        panel, El::LockedView(L_local, rows, above),
+                        panel, El::LockedView(L_rows.matrix, panel_rows, above),
                         El::NORMAL, El::LockedView(X, above, El::ALL), false,
                         multimodular_config, multimodular_timings);
                     multimodular_trsm_left_lower(
-                      El::LockedView(L_local, rows, rows), panel,
+                      El::LockedView(L_rows.matrix, panel_rows, rows), panel,
                       multimodular_config, multimodular_timings);
                     rows_done.at(block) = r1;
                     block_timings_ms(block_info.block_indices.at(block), 0)
@@ -442,9 +447,25 @@ void compute_Q(const Environment &env, const SDP &sdp,
                                 streaming ? &streaming_factors : nullptr);
   memory_trace(streaming ? "Cholesky done" : "Cholesky and L^{-1} B done");
   if(streaming)
-    syrk_Q_streaming(sdp, block_info, schur_complement_cholesky,
-                     multimodular_trsm, streaming_factors, bigint_syrk_context,
-                     Q, timers, block_timings_ms);
+    {
+      // While streaming, L of a block on several ranks is read from its factor object
+      // only: free the factor's per-rank structs and the block's distributed copy of L,
+      // and rebuild the latter afterwards (its lower triangle: the Schur complement
+      // solves and the condition numbers read nothing else).
+      for(size_t block = 0; block < streaming_factors.size(); ++block)
+        if(streaming_factors.at(block))
+          {
+            streaming_factors.at(block)->release_lower();
+            schur_complement_cholesky.blocks.at(block).Empty();
+          }
+      syrk_Q_streaming(sdp, block_info, schur_complement_cholesky,
+                       multimodular_trsm, streaming_factors,
+                       bigint_syrk_context, Q, timers, block_timings_ms);
+      for(size_t block = 0; block < streaming_factors.size(); ++block)
+        if(streaming_factors.at(block))
+          streaming_factors.at(block)->copy_lower(
+            schur_complement_cholesky.blocks.at(block));
+    }
   else
     syrk_Q(env, schur_off_diagonal, bigint_syrk_context, Q, timers,
            block_timings_ms, verbosity);
