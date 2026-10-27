@@ -14,10 +14,10 @@ void scale_multiply_add(const El::BigFloat &alpha,
 
 void initialize_schur_complement_solver(
   const Environment &env, const Block_Info &block_info, const SDP &sdp,
-  const std::array<
+  std::array<
     std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
     &A_X_inv,
-  const std::array<
+  std::array<
     std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
     &A_Y,
   const El::Grid &block_grid, Block_Diagonal_Matrix &schur_complement_cholesky,
@@ -45,10 +45,10 @@ void SDP_Solver::step(
   const SDP &sdp, const El::Grid &grid,
   const Paired_Block_Diagonal_Matrix &X_cholesky,
   const Paired_Block_Diagonal_Matrix &Y_cholesky,
-  const std::array<
+  std::array<
     std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
     &A_X_inv,
-  const std::array<
+  std::array<
     std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
     &A_Y,
   const Block_Vector &primal_residue_p,

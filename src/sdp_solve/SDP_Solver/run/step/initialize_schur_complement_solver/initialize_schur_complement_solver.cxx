@@ -62,10 +62,10 @@ void compute_Q(const Environment &env, const SDP &sdp,
 
 void initialize_schur_complement_solver(
   const Environment &env, const Block_Info &block_info, const SDP &sdp,
-  const std::array<
+  std::array<
     std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
     &A_X_inv,
-  const std::array<
+  std::array<
     std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
     &A_Y,
   const El::Grid &group_grid, Block_Diagonal_Matrix &schur_complement_cholesky,
@@ -85,6 +85,11 @@ void initialize_schur_complement_solver(
   // matrix of the same size that is then copied.
   compute_schur_complement(block_info, A_X_inv, A_Y, schur_complement_cholesky,
                            timers);
+  // #184: the bilinear pairings serve S only (the next iteration computes them anew,
+  // compute_bilinear_pairings()); free them before Q, the peak of the step.
+  for(auto *pairings : {&A_X_inv, &A_Y})
+    for(auto &parity : *pairings)
+      parity.clear();
   memory_trace("schur complement computed");
 
   compute_Q(env, sdp, block_info, schur_off_diagonal,

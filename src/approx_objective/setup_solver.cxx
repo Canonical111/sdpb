@@ -27,10 +27,10 @@ void compute_A_Y(
 
 void initialize_schur_complement_solver(
   const Environment &env, const Block_Info &block_info, const SDP &sdp,
-  const std::array<
+  std::array<
     std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
     &A_X_inv,
-  const std::array<
+  std::array<
     std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
     &A_Y,
   const El::Grid &block_grid, Block_Diagonal_Matrix &schur_complement_cholesky,
