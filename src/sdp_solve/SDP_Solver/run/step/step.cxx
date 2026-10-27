@@ -5,6 +5,7 @@
 #include "sdp_solve/SDP_Solver.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdp_solve/memory_estimates.hxx"
+#include "sdpb_util/malloc_trim.hxx"
 #include "sdpb_util/memory_trace.hxx"
 
 void scale_multiply_add(const El::BigFloat &alpha,
@@ -76,6 +77,7 @@ void SDP_Solver::step(
       print_allocation_message_per_node(env, "dX", get_allocated_bytes(dX));
       print_allocation_message_per_node(env, "dY", get_allocated_bytes(dY));
     }
+  release_free_heap();
   memory_trace("step start");
   {
     // SchurComplementCholesky = L', the Cholesky decomposition of the

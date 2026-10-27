@@ -3,6 +3,7 @@
 #include "sdpb_util/Timers/Timers.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdp_solve/memory_estimates.hxx"
+#include "sdpb_util/malloc_trim.hxx"
 #include "sdpb_util/memory_trace.hxx"
 
 // Compute the quantities needed to solve the Schur complement
@@ -90,6 +91,7 @@ void initialize_schur_complement_solver(
   for(auto *pairings : {&A_X_inv, &A_Y})
     for(auto &parity : *pairings)
       parity.clear();
+  release_free_heap();
   memory_trace("schur complement computed");
 
   compute_Q(env, sdp, block_info, schur_off_diagonal,

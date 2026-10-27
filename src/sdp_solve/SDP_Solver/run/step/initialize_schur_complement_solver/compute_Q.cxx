@@ -6,6 +6,7 @@
 #include "sdp_solve/SDP_Solver/run/multimodular/Multimodular_Block_Factor.hxx"
 #include "sdp_solve/SDP_Solver/run/multimodular/multimodular_blas.hxx"
 #include "sdp_solve/memory_estimates.hxx"
+#include "sdpb_util/malloc_trim.hxx"
 #include "sdpb_util/memory_trace.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
@@ -319,6 +320,9 @@ void syrk_Q_streaming(
           return;
         if(t % bands_per_panel == 0)
           {
+            // The previous panel's temporaries (multimodular workspaces, band
+            // copies) and freed T_j would otherwise stay resident.
+            release_free_heap();
             // T[r0:r1] = L[r0:r1,r0:r1]^{-1} (B[r0:r1] - L[r0:r1,0:r0] T[0:r0]) for the
             // rows the next bands_per_panel bands take, and ahead up to the pace.
             const size_t next_t = std::min(t + bands_per_panel, bands.size());
@@ -510,6 +514,9 @@ void compute_Q(const Environment &env, const SDP &sdp,
             streaming_factors.at(block)->release_lower();
             schur_complement_cholesky.blocks.at(block).Empty();
           }
+      // Free pages back to the OS before and after streaming (release_free_heap()).
+      release_free_heap();
+      memory_trace("streaming start");
       syrk_Q_streaming(sdp, block_info, schur_complement_cholesky,
                        multimodular_trsm, streaming_factors,
                        bigint_syrk_context, Q, timers, block_timings_ms);
@@ -517,6 +524,7 @@ void compute_Q(const Environment &env, const SDP &sdp,
         if(streaming_factors.at(block))
           streaming_factors.at(block)->copy_lower(
             schur_complement_cholesky.blocks.at(block));
+      release_free_heap();
     }
   else
     syrk_Q(env, schur_off_diagonal, bigint_syrk_context, Q, timers,
