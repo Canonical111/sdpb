@@ -15,8 +15,8 @@
 // Results agree with the default path to working precision but not bit for bit: the
 // association order and the per-band normalization both change roundings.
 //
-// Scope (v1): every local block must live on a single rank (always true at 1 rank, and
-// whenever #blocks >= #ranks per group).
+// A block spread over several ranks (an MPI group): every rank of the group gets the whole
+// L_X^{-1} and L_Y of the block (small) and forms only its own entries of each band.
 
 #include "Compute_S_Context.hxx"
 #include "sdp_solve/Block_Matrix/Block_Matrix.hxx"
@@ -164,7 +164,7 @@ namespace Sdpb::Sdpa
       }
     };
 
-    // out(:, p) = vec( Linv (F_p LY[:, j0:j1]) ) for every p, one local block.
+    // out(:, col) = vec( Linv (F_p LY[:, j0:j1]) ) for p = columns[col], one local block.
     // Linv and LY are lower triangular; their strict upper parts are ignored (they hold
     // stale values from the in-place Cholesky / inverse).
     // B = F_p LY[:, j0:j1] is formed in BigFloat from the sparse entries. With Linv_fixed,
@@ -175,13 +175,14 @@ namespace Sdpb::Sdpa
                       const El::Matrix<El::BigFloat> &Linv,
                       const Fixed_Lower *Linv_fixed,
                       const El::Matrix<El::BigFloat> &LY, const El::Int j0,
-                      const El::Int j1, El::Matrix<El::BigFloat> &out)
+                      const El::Int j1, const std::vector<El::Int> &columns,
+                      El::Matrix<El::BigFloat> &out)
     {
       const El::Int dim = Linv.Height();
       const El::Int width = j1 - j0;
       const auto prec = El::gmp::Precision();
       ASSERT_EQUAL(out.Height(), dim * width);
-      ASSERT_EQUAL(static_cast<size_t>(out.Width()), F_block.size());
+      ASSERT_EQUAL(static_cast<size_t>(out.Width()), columns.size());
 
       El::Matrix<El::BigFloat> B(dim, width);
       std::vector<char> is_nonzero_row(dim, 0);
@@ -202,13 +203,13 @@ namespace Sdpb::Sdpa
       std::vector<int8_t> B_signs;
       std::vector<long> B_exponents(width);
 
-      for(size_t p = 0; p < F_block.size(); ++p)
+      for(size_t col = 0; col < columns.size(); ++col)
         {
           // B := F_p LY[:, j0:j1], only rows where F_p has entries.
           for(const auto row : nonzero_rows)
             is_nonzero_row[row] = 0;
           nonzero_rows.clear();
-          for(const auto &e : F_block[p])
+          for(const auto &e : F_block.at(columns[col]))
             {
               const El::Int i = e.row;
               const El::Int k = e.col;
@@ -233,7 +234,7 @@ namespace Sdpb::Sdpa
 
           if(Linv_fixed == nullptr)
             {
-              // C := Linv B, written column by column into out(:, p) in vec order.
+              // C := Linv B, written column by column into out(:, col) in vec order.
               for(El::Int jj = 0; jj < width; ++jj)
                 {
                   for(El::Int i = 0; i < dim; ++i)
@@ -247,7 +248,7 @@ namespace Sdpb::Sdpa
                                   B.CRef(k, jj).gmp_float.get_mpf_t());
                           mpf_add(acc, acc, tmp);
                         }
-                      mpf_set(out(i + jj * dim, p).gmp_float.get_mpf_t(), acc);
+                      mpf_set(out(i + jj * dim, col).gmp_float.get_mpf_t(), acc);
                     }
                 }
               continue;
@@ -305,7 +306,7 @@ namespace Sdpb::Sdpa
                 mp_size_t size = sum_limbs;
                 while(size > 0 && result[size - 1] == 0)
                   --size;
-                auto *c = out(i + jj * dim, p).gmp_float.get_mpf_t();
+                auto *c = out(i + jj * dim, col).gmp_float.get_mpf_t();
                 if(size == 0)
                   {
                     mpf_set_ui(c, 0);
@@ -337,21 +338,31 @@ namespace Sdpb::Sdpa
     const auto bits = El::gmp::Precision();
     constexpr auto uplo = El::UPPER;
 
-    // Local copies of L_X^{-1} and L_Y (small: sum(dim^2) each).
+    // Local copies of L_X^{-1} and L_Y (small: sum(dim^2) each). A block on several
+    // ranks is gathered whole on each of them (LY_gathered).
     Scoped_Timer L_timer(timers, "L");
-    std::vector<El::Matrix<El::BigFloat>> Linv(num_blocks);
+    std::vector<El::Matrix<El::BigFloat>> Linv(num_blocks), LY_gathered(num_blocks);
     std::vector<const El::Matrix<El::BigFloat> *> LY(num_blocks);
     std::vector<El::Int> dims(num_blocks);
     for(size_t b = 0; b < num_blocks; ++b)
       {
         const auto &X_block = X_cholesky.blocks.at(b);
-        ASSERT(X_block.Grid().Size() == 1,
-               "SDPB_STREAM_P (v1) needs every block on a single rank; block ",
-               block_info.block_indices.at(b), " spans ",
-               X_block.Grid().Size(), " ranks");
-        Linv.at(b) = X_block.LockedMatrix();
+        const auto &Y_block = Y_cholesky.blocks.at(b);
+        if(X_block.Grid().Size() == 1)
+          {
+            Linv.at(b) = X_block.LockedMatrix();
+            LY.at(b) = &Y_block.LockedMatrix();
+          }
+        else
+          {
+            const El::DistMatrix<El::BigFloat, El::STAR, El::STAR> X_star(
+              X_block),
+              Y_star(Y_block);
+            Linv.at(b) = X_star.LockedMatrix();
+            LY_gathered.at(b) = Y_star.LockedMatrix();
+            LY.at(b) = &LY_gathered.at(b);
+          }
         El::TriangularInverse(El::LOWER, El::NON_UNIT, Linv.at(b));
-        LY.at(b) = &Y_cholesky.blocks.at(b).LockedMatrix();
         dims.at(b) = X_block.Height();
       }
     // Fixed-point rows kernel unless SDPB_STREAM_P_MPF is set (BigFloat, for checks).
@@ -371,7 +382,8 @@ namespace Sdpb::Sdpa
       static_cast<El::Int>(bands.size()), El::mpi::MAX, El::mpi::COMM_WORLD));
 
     // Rows of P for band t: one matrix per local block (zero height when the block is
-    // not in this band).
+    // not in this band). Each rank forms its own columns p of the band; on a grid with
+    // more than one row of ranks, all rows of those columns, of which it keeps its own.
     const auto fill_band = [&](const size_t t, Block_Matrix &band) {
       band.width = m;
       band.blocks.clear();
@@ -385,11 +397,27 @@ namespace Sdpb::Sdpa
           const auto b = slab.local_block;
           auto &block = band.blocks.at(b);
           block.Resize(dims.at(b) * (slab.col_end - slab.col_begin), m);
-          compute_slab(sdp.sparse_F.entries.at(b), sdp.sparse_F.values,
-                       Linv.at(b),
-                       Linv_fixed.empty() ? nullptr : &Linv_fixed.at(b),
-                       *LY.at(b), slab.col_begin, slab.col_end,
-                       block.Matrix());
+          std::vector<El::Int> columns(block.LocalWidth());
+          for(El::Int jLoc = 0; jLoc < block.LocalWidth(); ++jLoc)
+            columns.at(jLoc) = block.GlobalCol(jLoc);
+          const auto compute = [&](El::Matrix<El::BigFloat> &out) {
+            compute_slab(sdp.sparse_F.entries.at(b), sdp.sparse_F.values,
+                         Linv.at(b),
+                         Linv_fixed.empty() ? nullptr : &Linv_fixed.at(b),
+                         *LY.at(b), slab.col_begin, slab.col_end, columns,
+                         out);
+          };
+          if(block.ColStride() == 1)
+            {
+              compute(block.Matrix());
+              continue;
+            }
+          El::Matrix<El::BigFloat> all_rows(block.Height(), block.LocalWidth());
+          compute(all_rows);
+          for(El::Int jLoc = 0; jLoc < block.LocalWidth(); ++jLoc)
+            for(El::Int iLoc = 0; iLoc < block.LocalHeight(); ++iLoc)
+              block.SetLocal(iLoc, jLoc,
+                             all_rows.CRef(block.GlobalRow(iLoc), jLoc));
         }
     };
 
@@ -412,6 +440,8 @@ namespace Sdpb::Sdpa
             // The L copies are no longer needed; free them before the restore.
             Linv.clear();
             Linv.shrink_to_fit();
+            LY_gathered.clear();
+            LY_gathered.shrink_to_fit();
             Linv_fixed.clear();
             Linv_fixed.shrink_to_fit();
           },

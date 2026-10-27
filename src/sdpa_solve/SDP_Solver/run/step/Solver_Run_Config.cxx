@@ -442,10 +442,11 @@ namespace Sdpb::Sdpa
       return total_bytes <= max_total_mem && shmem_bytes <= max_shared_mem;
     };
 
-    // #184: streaming S has no trmm to balance against. It needs bands at least as tall
-    // as the largest block (one column of G_p per band row group) and prefers them as
-    // tall as possible (fewer, longer BLAS calls). Take the smallest output split that
-    // admits such bands, then the smallest input split (= tallest bands) that fits.
+    // #184: streaming S has no trmm to balance against. Each MPI group needs bands at
+    // least as tall as its largest block (one column of G_p per band row group) and
+    // prefers them as tall as possible (fewer, longer BLAS calls). Take the smallest
+    // output split that admits such bands, then the smallest input split (= tallest
+    // bands) that fits.
     std::optional<Solver_Run_Config> streaming_result;
     if(stream_S_enabled())
       {
@@ -461,6 +462,17 @@ namespace Sdpb::Sdpa
         };
         const size_t max_dim = *std::max_element(
           block_info.block_dimensions.begin(), block_info.block_dimensions.end());
+        // Largest block of each MPI group on this node (as P_group_heights).
+        std::vector<size_t> group_max_dims;
+        for(const auto &group :
+            block_info.block_mapping.mapping.at(block_info.node_index))
+          {
+            size_t group_max_dim = 0;
+            for(const auto block_index : group.block_indices)
+              group_max_dim = std::max(
+                group_max_dim, block_info.block_dimensions.at(block_index));
+            group_max_dims.push_back(group_max_dim);
+          }
         for(size_t output_split = 1; output_split <= max_syrk_output_split_factor;
             ++output_split)
           {
@@ -478,11 +490,14 @@ namespace Sdpb::Sdpa
             const auto syrk_cfg = create_syrk_cfg(input_split, output_split);
             const auto &heights
               = syrk_cfg.input_window_height_per_group_per_prime;
-            size_t min_height
-              = *std::min_element(heights.begin(), heights.end());
-            min_height = El::mpi::AllReduce(min_height, El::mpi::MIN,
-                                            El::mpi::COMM_WORLD);
-            if(min_height >= max_dim)
+            ASSERT_EQUAL(heights.size(), group_max_dims.size());
+            int tall_enough = 1;
+            for(size_t group = 0; group < heights.size(); ++group)
+              if(heights.at(group) < group_max_dims.at(group))
+                tall_enough = 0;
+            tall_enough = El::mpi::AllReduce(tall_enough, El::mpi::MIN,
+                                             El::mpi::COMM_WORLD);
+            if(tall_enough == 1)
               {
                 streaming_result.emplace(sizes, smallest_init_P_cfg, syrk_cfg);
                 break;
@@ -492,7 +507,8 @@ namespace Sdpb::Sdpa
           RUNTIME_ERROR("SDPB_STREAM_P: no syrk configuration within "
                       "--maxSharedMemory=",
                       parameters.max_shared_memory,
-                      " holds bands as tall as the largest block (", max_dim,
+                      " holds bands as tall as each MPI group's largest block "
+                      "(largest: ", max_dim,
                       " rows); raise --maxSharedMemory");
       }
 
