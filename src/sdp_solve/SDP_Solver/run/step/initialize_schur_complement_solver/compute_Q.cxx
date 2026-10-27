@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -226,6 +227,27 @@ void syrk_Q_streaming(
   for(size_t block = 0; block < num_blocks; ++block)
     total_cost += rows_cost(sdp.free_var_block_height(block));
 
+  // The grid of each band block. With --multimodularTrsm a block on a grid of several
+  // rows gets a grid of one row over the same ranks in VR order: each rank then owns the
+  // same whole columns of the band as of T_j ([STAR,VR]), so the copy into the band is
+  // local and the residues are computed column by column. On the block's own grid,
+  // [MC,MR] splits each column over the grid rows: a redistribution per band, and the
+  // residues written to the window one by one.
+  std::vector<const El::Grid *> band_grids(num_blocks);
+  std::map<const El::Grid *, std::unique_ptr<El::Grid>> column_grids;
+  for(size_t block = 0; block < num_blocks; ++block)
+    {
+      const auto &grid = B.blocks.at(block).Grid();
+      band_grids.at(block) = &grid;
+      if(multimodular_trsm && grid.Height() > 1)
+        {
+          auto &column_grid = column_grids[&grid];
+          if(!column_grid)
+            column_grid = std::make_unique<El::Grid>(grid.VRComm(), 1);
+          band_grids.at(block) = column_grid.get();
+        }
+    }
+
   // T_j: [MC,MR] like B_j (El), or this rank's columns of it (multimodular).
   std::vector<std::unique_ptr<El::DistMatrix<El::BigFloat>>> L_inv_B(
     num_blocks);
@@ -248,7 +270,7 @@ void syrk_Q_streaming(
         blocks.clear();
         blocks.reserve(num_blocks);
         for(size_t block = 0; block < num_blocks; ++block)
-          blocks.emplace_back(0, N, B.blocks.at(block).Grid());
+          blocks.emplace_back(0, N, *band_grids.at(block));
         if(t >= bands.size())
           return;
         if(t % bands_per_panel == 0)
@@ -338,9 +360,19 @@ void syrk_Q_streaming(
           {
             const El::IR rows(piece.row_begin, piece.row_end);
             if(multimodular_trsm)
-              El::Copy(El::LockedView(*L_inv_B_columns.at(piece.block), rows,
-                                      El::ALL),
-                       blocks.at(piece.block));
+              {
+                // The same columns on the same ranks (band_grids): a local copy.
+                const auto &T = *L_inv_B_columns.at(piece.block);
+                auto &band_block = blocks.at(piece.block);
+                band_block.Resize(piece.row_end - piece.row_begin, N);
+                ASSERT_EQUAL(band_block.LocalWidth(), T.LocalWidth());
+                ASSERT(T.LocalWidth() == 0
+                         || band_block.GlobalCol(0) == T.GlobalCol(0),
+                       DEBUG_STRING(band_block.GlobalCol(0)),
+                       DEBUG_STRING(T.GlobalCol(0)));
+                El::Copy(El::LockedView(T.LockedMatrix(), rows, El::ALL),
+                         band_block.Matrix());
+              }
             else
               El::Copy(El::LockedView(*L_inv_B.at(piece.block), rows, El::ALL),
                        blocks.at(piece.block));
