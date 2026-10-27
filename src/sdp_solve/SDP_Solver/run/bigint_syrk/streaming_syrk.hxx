@@ -201,9 +201,10 @@ namespace Streaming_Syrk
           const auto t2 = clock::now();
           if(with_syrk)
             syrk_context.accumulate_band(blocks, band_timers, block_timings_ms);
-          if(t == num_bands / 2)
-            memory_trace(with_syrk ? "streaming syrk: middle band"
-                                   : "streaming norms: middle band");
+          if(t == num_bands / 4 || t == num_bands / 2 || t + 1 == num_bands)
+            memory_trace(std::string(with_syrk ? "streaming syrk"
+                                               : "streaming norms")
+                         + ": band " + std::to_string(t));
           profile.produce += t1 - t0;
           profile.scale += t2 - t1;
           profile.syrk += clock::now() - t2;
