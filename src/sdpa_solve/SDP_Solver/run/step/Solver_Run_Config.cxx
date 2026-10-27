@@ -143,8 +143,11 @@ namespace Sdpb::Sdpa
             NAMED_GROUP_ITEM(shmem_syrk_S, syrk_input_windows,
                              "input window(s)",
                              syrk_cfg.input_windows_bytes());
+            // #184: band accumulation stages each band's values in the output
+            // window, or beside it if they do not fit.
             NAMED_GROUP_ITEM(shmem_syrk_S, syrk_output_window, "output window",
-                             syrk_cfg.output_window_bytes());
+                             std::max(syrk_cfg.output_window_bytes(),
+                                      syrk_cfg.band_values_bytes()));
             NAMED_ALLOC(
               shmem_overhead, "Page table for shared memory",
               shmem_overhead_bytes(env.comm_shared_mem, sdpb_shmem_bytes));

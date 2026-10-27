@@ -395,6 +395,14 @@ void syrk_Q_streaming(
     },
     bigint_syrk_context.band_column_exponents, Q, block_timings_ms, profile);
 
+  // The slowest rank's BLAS and reduction (collective, so before the print on rank 0).
+  const double blas_reduce_max
+    = Streaming_Syrk::profiling()
+        ? El::mpi::AllReduce(
+            bigint_syrk_context.band_accumulation_profile.blas
+              + bigint_syrk_context.band_accumulation_profile.reduce,
+            El::mpi::MAX, El::mpi::COMM_WORLD)
+        : 0.0;
   if(Streaming_Syrk::profiling() && El::mpi::Rank(El::mpi::COMM_WORLD) == 0)
     {
       const auto &sp = bigint_syrk_context.band_accumulation_profile;
@@ -410,7 +418,8 @@ void syrk_Q_streaming(
                  " s), scale ", profile.scale.count(), " s, syrk ",
                  profile.syrk.count(), " s (last pass: residues ",
                  sp.residues, ", blas ", sp.blas, ", reduce ", sp.reduce,
-                 ", fence ", sp.fence, "), restore ",
+                 ", fence ", sp.fence, "; blas+reduce slowest rank ",
+                 blas_reduce_max, "), restore ",
                  profile.restore.count(), " s; log2(norm/2^E) in [",
                  profile.lowest, ", ", profile.highest, "]; trsm by rank [",
                  ranks.str(), "]",

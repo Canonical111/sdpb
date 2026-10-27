@@ -199,11 +199,13 @@ private:
     El::Range<El::Int> J;
     std::vector<Accumulator_Run> runs;
   };
-  // One BLAS job of this rank (job.I, job.J relative to its block), summed column by
-  // column from accumulator[offset]: the upper triangle of a syrk job, all of a gemm job.
+  // One BLAS job of this rank in the schedule of the whole output (job.I, job.J global,
+  // as for an output split factor 1: the output blocks only bound the restore's window,
+  // and one schedule balances the ranks' work better than one per block), summed column
+  // by column from accumulator[offset]: the upper triangle of a syrk job, all of a gemm
+  // job.
   struct Accumulator_Tile
   {
-    size_t block;
     Blas_Job job;
     size_t offset;
   };
@@ -214,6 +216,23 @@ private:
   std::vector<float> accumulator;
   // BLAS output of one tile.
   std::vector<double> tile_scratch;
+  // The band's values, staged by their owners at the input window's rows and columns
+  // (records of band_value_record limbs: size, exponent, limbs), so that all ranks share
+  // computing the residues: a rank's own part of a band is as uneven as the block
+  // mapping makes it (a rank holding several blocks whole has many times the entries of
+  // one holding some columns of a big block). They are kept in the output window, idle
+  // until the restore, or in a window of their own if it is too small
+  // (Bigint_Syrk_Config::band_values_bytes()).
+  mp_limb_t *band_values = nullptr;
+  std::unique_ptr<Shared_Window_Array<mp_limb_t>> band_values_window;
+  size_t band_value_limbs = 0;
+  size_t band_value_record = 0;
+  void fence_band_values();
+  void stage_band_values(
+    const std::vector<El::DistMatrix<El::BigFloat>> &bigint_band_blocks);
+  void compute_staged_band_residues(
+    const std::vector<El::DistMatrix<El::BigFloat>> &bigint_band_blocks,
+    El::Matrix<int32_t> &block_timings_ms);
 
   [[nodiscard]] El::Int input_group_height_per_prime() const;
 };

@@ -1,5 +1,7 @@
 #include "Bigint_Syrk_Config.hxx"
 
+#include <algorithm>
+
 // Helper functions. TODO move elsewhere and reuse?
 namespace
 {
@@ -139,10 +141,22 @@ size_t Bigint_Syrk_Config::node_local_bytes() const
                          get_reduce_scatter_buffer_size()))
          + accumulator_bytes;
 }
+size_t Bigint_Syrk_Config::band_values_bytes() const
+{
+  if(!full_width_input)
+    return 0;
+  // One record per input window entry: size, exponent and the limbs of an mpf of
+  // the BigFloat precision (_mp_prec + 1 = ceil(bits / 64) + 2 limbs).
+  const size_t limbs = div_ceil(El::gmp::Precision(), GMP_NUMB_BITS) + 2;
+  return sizeof(mp_limb_t) * input_window_height() * input_window_width()
+         * (2 + limbs);
+}
 size_t Bigint_Syrk_Config::node_shmem_bytes() const
 {
-  // Input and output residue windows
-  return input_windows_bytes() + output_window_bytes();
+  // Input and output residue windows; band accumulation stages each band's values
+  // in the output window, or beside it if they do not fit.
+  return input_windows_bytes()
+         + std::max(output_window_bytes(), band_values_bytes());
 }
 size_t Bigint_Syrk_Config::node_total_bytes() const
 {

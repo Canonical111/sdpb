@@ -52,6 +52,8 @@ struct Bigint_Syrk_Config
 
   [[nodiscard]] size_t input_windows_bytes() const;
   [[nodiscard]] size_t output_window_bytes() const;
+  // #184: band accumulation's staged band values (BigInt_Shared_Memory_Syrk_Context)
+  [[nodiscard]] size_t band_values_bytes() const;
 
   [[nodiscard]] size_t node_P_normalizer_bytes() const;
   [[nodiscard]] size_t node_normalize_and_shift_P_bytes() const;
