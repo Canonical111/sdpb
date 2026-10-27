@@ -82,9 +82,11 @@ public:
   }
 
   // #184: Q summed over many bands that share one integer scaling, restored once.
-  // After each band the output residues are reduced mod their prime and added into a
-  // private accumulator (this rank's elements of the upper triangle of Q, all primes),
-  // so the CRT runs once per accumulation instead of once per band.
+  // Every band runs the same BLAS jobs, so each rank sums the products of its own jobs,
+  // reduced mod their prime, in private tiles; the output window is used only by the
+  // restore, which gathers there all primes of each element for the CRT. The CRT thus
+  // runs once per accumulation instead of once per band, and a band costs no clearing,
+  // reduction or fences on the shared output window.
   // Single node, UPPER, full_width_input; every band spans all columns of Q.
   // Collective: all ranks call begin, then accumulate_band the same number of times,
   // then restore_band_accumulation.
@@ -109,7 +111,7 @@ public:
   // Seconds spent in accumulate_band() since the last begin_band_accumulation().
   struct Band_Accumulation_Profile
   {
-    double residues = 0, clear = 0, blas = 0, reduce = 0;
+    double residues = 0, blas = 0, reduce = 0, fence = 0;
   } band_accumulation_profile;
   // Restored values are exact while |Q(i,j)| < 2^(primes_product_bits() - 2).
   [[nodiscard]] flint_bitcnt_t primes_product_bits() const
@@ -182,14 +184,14 @@ private:
   El::Int restore_col_offset = 0;
 
   // Band accumulation state (#184). A run is a contiguous piece of one column of an
-  // output block: rows [row_begin, row_begin + length) of global column col.
+  // output block that this rank restores: rows [row_begin, row_begin + length) of
+  // global column col.
   struct Accumulator_Run
   {
     El::Int row_begin;
     El::Int col;
     El::Int length;
     size_t window_offset; // in each prime's output matrix
-    size_t accumulator_offset; // in each prime's slice of the accumulator
   };
   struct Accumulator_Block
   {
@@ -197,13 +199,21 @@ private:
     El::Range<El::Int> J;
     std::vector<Accumulator_Run> runs;
   };
+  // One BLAS job of this rank (job.I, job.J relative to its block), summed column by
+  // column from accumulator[offset]: the upper triangle of a syrk job, all of a gemm job.
+  struct Accumulator_Tile
+  {
+    size_t block;
+    Blas_Job job;
+    size_t offset;
+  };
   std::vector<Accumulator_Block> accumulator_blocks;
-  // [prime][element], residues in [0, prime). Primes are < 2^21 (capped for
-  // full_width_input, see Bigint_Syrk_Config::comb()), so float is exact.
+  std::vector<Accumulator_Tile> accumulator_tiles;
+  // Residues in [0, prime). Primes are < 2^21 (capped for full_width_input, see
+  // Bigint_Syrk_Config::comb()), so float is exact.
   std::vector<float> accumulator;
-  size_t accumulator_elements = 0;
-
-  void clear_output_residues(const Job_Schedule &blas_job_schedule);
+  // BLAS output of one tile.
+  std::vector<double> tile_scratch;
 
   [[nodiscard]] El::Int input_group_height_per_prime() const;
 };

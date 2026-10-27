@@ -9,9 +9,10 @@
 
 namespace
 {
-  // output = inputA^T * inputB
+  // output = inputA^T * inputB + beta * output
   void gemm(const El::Matrix<double> &input_A,
-            const El::Matrix<double> &input_B, El::Matrix<double> &output)
+            const El::Matrix<double> &input_B, El::Matrix<double> &output,
+            const double beta = 1.0)
   {
     // A: KxN matrix
     // A: KxM matrix
@@ -31,17 +32,16 @@ namespace
     const double *B = input_B.LockedBuffer();
     const CBLAS_INDEX lda = input_A.LDim();
     const CBLAS_INDEX ldb = input_B.LDim();
-    const double beta = 1.0;
     double *C = output.Buffer();
     const CBLAS_INDEX ldc = output.LDim();
-    // C := alpha * A^T * B + beta * C = (in our case) A^T * B + C
+    // C := alpha * A^T * B + beta * C
     cblas_dgemm(layout, TransA, TransB, M, N, K, alpha, A, lda, B, ldb, beta,
                 C, ldc);
   }
 
-  // output = input^T * input
+  // output = input^T * input + beta * output (the uplo triangle)
   void syrk(const El::UpperOrLower uplo, const El::Matrix<double> &input,
-            El::Matrix<double> &output)
+            El::Matrix<double> &output, const double beta = 1.0)
   {
     // input: KxN matrix
     // output = input^T * input: NxN matrix
@@ -57,10 +57,9 @@ namespace
     const double alpha = 1.0;
     const double *A = input.LockedBuffer();
     const CBLAS_INDEX lda = input.LDim();
-    const double beta = 1.0;
     double *C = output.Buffer();
     const CBLAS_INDEX ldc = output.LDim();
-    // C := alpha * A^T * A + beta * C = (in our case) A^T * A + C
+    // C := alpha * A^T * A + beta * C
     cblas_dsyrk(layout, Uplo, Trans, N, K, alpha, A, lda, beta, C, ldc);
   }
 
@@ -429,8 +428,16 @@ void BigInt_Shared_Memory_Syrk_Context::
   output_residues_window->Fence();
 }
 
-// #184: band accumulation (see the header). Q's residues are summed over all bands in a
-// private accumulator instead of being restored band by band.
+// #184: band accumulation (see the header). Q's residues are summed over all bands in
+// private tiles instead of being restored band by band.
+
+namespace
+{
+  El::Int tile_column_length(const Blas_Job &job, const El::Int col)
+  {
+    return job.kind == Blas_Job::syrk ? col + 1 : job.I.end - job.I.beg;
+  }
+}
 
 bool BigInt_Shared_Memory_Syrk_Context::can_accumulate_bands(
   const El::DistMatrix<El::BigFloat> &output) const
@@ -449,13 +456,17 @@ void BigInt_Shared_Memory_Syrk_Context::begin_band_accumulation(
   for(const auto prime : comb.primes)
     ASSERT(prime < (mp_limb_t(1) << 24), "band accumulation: prime ", prime,
            " >= 2^24 cannot be stored as float");
+  constexpr auto uplo = El::UPPER;
   const auto ranges
     = split_range({0, output.Height()}, output_window_split_factor);
   const auto window_height
     = static_cast<size_t>(output_residues_window->height);
+  const auto rank = shared_memory_comm.Rank();
 
   accumulator_blocks.clear();
-  accumulator_elements = 0;
+  accumulator_tiles.clear();
+  size_t accumulator_size = 0;
+  size_t scratch_size = 0;
   for(size_t i = 0; i < ranges.size(); ++i)
     for(size_t j = i; j < ranges.size(); ++j)
       {
@@ -484,14 +495,32 @@ void BigInt_Shared_Memory_Syrk_Context::begin_band_accumulation(
                       {row, col, 1,
                        static_cast<size_t>(row - block.I.beg)
                          + static_cast<size_t>(col - block.J.beg)
-                             * window_height,
-                       accumulator_elements});
+                             * window_height});
                   }
-                ++accumulator_elements;
               }
           }
+        // This rank's BLAS jobs for the block.
+        const auto kind = block.I == block.J ? Blas_Job::syrk : Blas_Job::gemm;
+        const auto &schedule
+          = get_blas_job_schedule(kind, uplo, block.I.end - block.I.beg,
+                                  block.J.end - block.J.beg);
+        for(const auto &job : schedule.jobs_by_rank.at(rank))
+          {
+            const El::Int height = job.I.end - job.I.beg;
+            const El::Int width = job.J.end - job.J.beg;
+            if(job.kind == Blas_Job::syrk)
+              ASSERT_EQUAL(height, width);
+            accumulator_tiles.push_back(
+              {accumulator_blocks.size() - 1, job, accumulator_size});
+            for(El::Int col = 0; col < width; ++col)
+              accumulator_size
+                += static_cast<size_t>(tile_column_length(job, col));
+            scratch_size
+              = std::max(scratch_size, static_cast<size_t>(height * width));
+          }
       }
-  accumulator.assign(accumulator_elements * comb.num_primes, 0.0f);
+  accumulator.assign(accumulator_size, 0.0f);
+  tile_scratch.assign(scratch_size, 0.0);
   band_accumulation_profile = {};
 }
 
@@ -500,22 +529,6 @@ void BigInt_Shared_Memory_Syrk_Context::reset_band_accumulation()
   ASSERT(!accumulator_blocks.empty(), "begin_band_accumulation() not called");
   std::fill(accumulator.begin(), accumulator.end(), 0.0f);
   band_accumulation_profile = {};
-}
-
-// Zero this rank's parts of the output window (the Q_IJ of its BLAS jobs).
-void BigInt_Shared_Memory_Syrk_Context::clear_output_residues(
-  const Job_Schedule &blas_job_schedule)
-{
-  const auto rank = shared_memory_comm.Rank();
-  for(const auto &job : blas_job_schedule.jobs_by_rank.at(rank))
-    {
-      auto &output_matrix
-        = output_residues_window->residues.at(job.prime_index);
-      El::Matrix<double> submatrix;
-      El::View(submatrix, output_matrix, job.I, job.J);
-      El::Zero(submatrix);
-    }
-  output_residues_window->Fence();
 }
 
 void BigInt_Shared_Memory_Syrk_Context::accumulate_band(
@@ -541,80 +554,62 @@ void BigInt_Shared_Memory_Syrk_Context::accumulate_band(
                          block_timings_ms);
   profile.residues += seconds_since(t0);
 
-  const auto rank = shared_memory_comm.Rank();
-  for(const auto &block : accumulator_blocks)
-    {
-      const auto height = block.I.end - block.I.beg;
-      const auto block_width = block.J.end - block.J.beg;
-      const auto kind = block.I == block.J ? Blas_Job::syrk : Blas_Job::gemm;
-      const auto &schedule
-        = get_blas_job_schedule(kind, uplo, height, block_width);
-      t0 = clock::now();
+  {
+    Scoped_Timer syrk_timer(timers, "syrk_and_reduce");
+    constexpr double round_magic = 6755399441055744.0; // 2^52 + 2^51
+    for(const auto &tile : accumulator_tiles)
       {
-        Scoped_Timer clear_timer(timers, "clear_output");
-        clear_output_residues(schedule);
-      }
-      profile.clear += seconds_since(t0);
-      t0 = clock::now();
-      {
-        // As do_blas_job(), with the job's columns offset to the block's place in
-        // the full-width input.
-        Scoped_Timer syrk_timer(timers, "syrk");
-        for(const auto &job : schedule.jobs_by_rank.at(rank))
+        const auto &block = accumulator_blocks.at(tile.block);
+        const auto &job = tile.job;
+        const auto &residues = input.residues.at(job.prime_index);
+        const El::Int height = job.I.end - job.I.beg;
+        const El::Int tile_width = job.J.end - job.J.beg;
+        // As do_blas_job(), with the job's columns offset to the block's place in the
+        // full-width input, into this rank's scratch.
+        t0 = clock::now();
+        El::Matrix<double> product;
+        product.Attach(height, tile_width, tile_scratch.data(), height);
+        const El::Range<El::Int> I(block.I.beg + job.I.beg,
+                                   block.I.beg + job.I.end);
+        const El::Range<El::Int> J(block.J.beg + job.J.beg,
+                                   block.J.beg + job.J.end);
+        if(job.kind == Blas_Job::syrk)
+          syrk(uplo, El::LockedView(residues, El::ALL, I), product, 0.0);
+        else
+          gemm(El::LockedView(residues, El::ALL, I),
+               El::LockedView(residues, El::ALL, J), product, 0.0);
+        profile.blas += seconds_since(t0);
+        t0 = clock::now();
+        // acc := (acc + product mod prime) mod prime. Per band, |product| <= (input
+        // window height) * prime^2 / 4, far below 2^51, so the rounding below is exact.
+        const double prime = comb.primes.at(job.prime_index);
+        const double prime_inverse = 1.0 / prime;
+        float *acc = accumulator.data() + tile.offset;
+        for(El::Int col = 0; col < tile_width; ++col)
           {
-            const auto &residues = input.residues.at(job.prime_index);
-            auto output_matrix = El::View(
-              output_residues_window->residues.at(job.prime_index), job.I,
-              job.J);
-            const El::Range<El::Int> I(block.I.beg + job.I.beg,
-                                       block.I.beg + job.I.end);
-            const El::Range<El::Int> J(block.J.beg + job.J.beg,
-                                       block.J.beg + job.J.end);
-            if(job.kind == Blas_Job::syrk)
-              syrk(uplo, El::LockedView(residues, El::ALL, I), output_matrix);
-            else
-              gemm(El::LockedView(residues, El::ALL, I),
-                   El::LockedView(residues, El::ALL, J), output_matrix);
-          }
-        output_residues_window->Fence();
-      }
-      profile.blas += seconds_since(t0);
-      t0 = clock::now();
-      {
-        // acc := (acc + Q_IJ mod prime) mod prime. Per band, |Q_IJ| <= height * prime^2 / 4,
-        // far below 2^51, so the rounding below is exact.
-        Scoped_Timer reduce_timer(timers, "reduce");
-        constexpr double round_magic = 6755399441055744.0; // 2^52 + 2^51
-        for(size_t prime_index = 0; prime_index < comb.num_primes;
-            ++prime_index)
-          {
-            const double prime = comb.primes.at(prime_index);
-            const double prime_inverse = 1.0 / prime;
-            const double *window
-              = output_residues_window->residues.at(prime_index)
-                  .LockedBuffer();
-            float *acc
-              = accumulator.data() + prime_index * accumulator_elements;
-            for(const auto &run : block.runs)
+            const double *x = product.LockedBuffer(0, col);
+            const El::Int length = tile_column_length(job, col);
+            for(El::Int k = 0; k < length; ++k)
               {
-                const double *x = window + run.window_offset;
-                float *a = acc + run.accumulator_offset;
-                for(El::Int k = 0; k < run.length; ++k)
-                  {
-                    const double q
-                      = (x[k] * prime_inverse + round_magic) - round_magic;
-                    double sum = a[k] + (x[k] - q * prime);
-                    sum = sum < 0 ? sum + prime : sum;
-                    sum = sum >= prime ? sum - prime : sum;
-                    a[k] = static_cast<float>(sum);
-                  }
+                const double q
+                  = (x[k] * prime_inverse + round_magic) - round_magic;
+                double sum = acc[k] + (x[k] - q * prime);
+                sum = sum < 0 ? sum + prime : sum;
+                sum = sum >= prime ? sum - prime : sum;
+                acc[k] = static_cast<float>(sum);
               }
+            acc += length;
           }
-        // Nobody clears the window for the next block before everyone has read it.
-        output_residues_window->Fence();
+        profile.reduce += seconds_since(t0);
       }
-      profile.reduce += seconds_since(t0);
-    }
+  }
+  // Nobody writes the next band's residues before everyone has read this band.
+  t0 = clock::now();
+  {
+    Scoped_Timer fence_timer(timers, "fence");
+    input_grouped_block_residues_window_A->Fence();
+  }
+  profile.fence += seconds_since(t0);
 }
 
 void BigInt_Shared_Memory_Syrk_Context::restore_band_accumulation(
@@ -625,21 +620,47 @@ void BigInt_Shared_Memory_Syrk_Context::restore_band_accumulation(
   constexpr int sign = 1; // negative values allowed
   std::vector<mp_limb_t> residues(comb.num_primes);
   Fmpz_BigInt value;
-  for(const auto &block : accumulator_blocks)
-    for(const auto &run : block.runs)
-      for(El::Int k = 0; k < run.length; ++k)
+  for(size_t block_index = 0; block_index < accumulator_blocks.size();
+      ++block_index)
+    {
+      // This rank's tiles of the block into the output window...
+      for(const auto &tile : accumulator_tiles)
         {
-          const size_t element = run.accumulator_offset + k;
-          for(size_t prime_index = 0; prime_index < comb.num_primes;
-              ++prime_index)
-            residues.at(prime_index) = static_cast<mp_limb_t>(
-              accumulator.at(prime_index * accumulator_elements + element));
-          fmpz_multi_CRT_ui(value.value, residues.data(), comb.comb,
-                            comb.comb_temp, sign);
-          callback(run.row_begin + k, run.col, value);
+          if(tile.block != block_index)
+            continue;
+          const auto &job = tile.job;
+          auto &window = output_residues_window->residues.at(job.prime_index);
+          const float *acc = accumulator.data() + tile.offset;
+          for(El::Int col = 0; col < job.J.end - job.J.beg; ++col)
+            {
+              double *x = window.Buffer(job.I.beg, job.J.beg + col);
+              const El::Int length = tile_column_length(job, col);
+              for(El::Int k = 0; k < length; ++k)
+                x[k] = acc[k];
+              acc += length;
+            }
         }
+      output_residues_window->Fence();
+      // ...and the elements of Q that this rank holds, out of it.
+      for(const auto &run : accumulator_blocks.at(block_index).runs)
+        for(El::Int k = 0; k < run.length; ++k)
+          {
+            for(size_t prime_index = 0; prime_index < comb.num_primes;
+                ++prime_index)
+              residues.at(prime_index) = static_cast<mp_limb_t>(
+                output_residues_window->residues.at(prime_index)
+                  .LockedBuffer()[run.window_offset + k]);
+            fmpz_multi_CRT_ui(value.value, residues.data(), comb.comb,
+                              comb.comb_temp, sign);
+            callback(run.row_begin + k, run.col, value);
+          }
+      // Nobody writes the next block before everyone has read this one.
+      output_residues_window->Fence();
+    }
   accumulator_blocks.clear();
+  accumulator_tiles.clear();
   accumulator.clear();
   accumulator.shrink_to_fit();
-  accumulator_elements = 0;
+  tile_scratch.clear();
+  tile_scratch.shrink_to_fit();
 }

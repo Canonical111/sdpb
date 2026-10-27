@@ -452,8 +452,8 @@ namespace Sdpb::Sdpa
             El::Output("S_stream: ", num_iterations, " bands, ", profile.passes,
                        " passes; rows ", profile.produce.count(), " s, scale ",
                        profile.scale.count(), " s, syrk ", profile.syrk.count(),
-                       " s (last pass: residues ", sp.residues, ", clear ",
-                       sp.clear, ", blas ", sp.blas, ", reduce ", sp.reduce,
+                       " s (last pass: residues ", sp.residues, ", blas ",
+                       sp.blas, ", reduce ", sp.reduce, ", fence ", sp.fence,
                        "), restore ", profile.restore.count(),
                        " s; log2(norm/2^E) in [", profile.lowest, ", ",
                        profile.highest, "]");
