@@ -37,6 +37,14 @@ struct Sparse_Block_Matrix
   // dense := this block, on dense's grid (which must be the grid of the
   // matrix this was made from).
   void to_dense(El::DistMatrix<El::BigFloat> &dense) const;
+  // dense := columns [j0, j1) of this block, as a view of them would be distributed;
+  // j0 must be a multiple of the grid width, so that the local columns are a range of
+  // this block's.
+  void to_dense_columns(El::DistMatrix<El::BigFloat> &dense, El::Int j0,
+                        El::Int j1) const;
+  // local := local columns [first_column, first_column + local.Width()), all local rows
+  void to_dense_local(El::Matrix<El::BigFloat> &local,
+                      El::Int first_column) const;
 
   size_t num_nonzeros_local() const { return values.size(); }
   // Elements that the dense local matrix would hold

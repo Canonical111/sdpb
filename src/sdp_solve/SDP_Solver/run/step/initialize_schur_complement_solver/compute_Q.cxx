@@ -137,6 +137,50 @@ void syrk_Q(const Environment &env, Block_Matrix &schur_off_diagonal,
   restore_syrk_output(uplo, normalizer, Q);
 }
 
+// T := B_j as [STAR,VR] (each rank whole columns), aligned at 0. Densifying the whole block
+// as [MC,MR] and redistributing it would take several times T in transient memory, for
+// every block started in the same panel (all the big blocks start in the first). On a grid
+// of one row, [MC,MR] and [STAR,VR] hold the same columns, so the sparse B fills T
+// directly; otherwise B goes over in chunks of columns, a multiple of the grid size wide,
+// so that a chunk's local columns are a range of T's.
+static void
+free_var_block_columns(const SDP &sdp, const size_t block,
+                       El::DistMatrix<El::BigFloat, El::STAR, El::VR> &T)
+{
+  const auto &grid = sdp.free_var_matrix.blocks.at(block).Grid();
+  const El::Int height = sdp.free_var_block_height(block);
+  const El::Int width = sdp.free_var_block_width(block);
+  T.AlignRows(0);
+  T.Resize(height, width);
+  if(sdp.sparse_free_var_matrix && grid.Height() == 1
+     && sdp.free_var_matrix_sparse.at(block).row_align == 0)
+    {
+      const auto &sparse = sdp.free_var_matrix_sparse.at(block);
+      ASSERT_EQUAL(sparse.local_width, T.LocalWidth());
+      sparse.to_dense_local(T.Matrix(), 0);
+      return;
+    }
+  const El::Int grid_size = grid.Size();
+  const El::Int chunk = grid_size * std::max<El::Int>(1, 128 / grid_size);
+  for(El::Int j0 = 0; j0 < width; j0 += chunk)
+    {
+      const El::Int j1 = std::min(width, j0 + chunk);
+      El::DistMatrix<El::BigFloat> dense(grid);
+      if(sdp.sparse_free_var_matrix)
+        sdp.free_var_matrix_sparse.at(block).to_dense_columns(dense, j0, j1);
+      else
+        El::LockedView(dense, sdp.free_var_matrix.blocks.at(block), El::ALL,
+                       El::IR(j0, j1));
+      El::DistMatrix<El::BigFloat, El::STAR, El::VR> part(grid);
+      part.AlignRows(0);
+      part = dense;
+      El::Matrix<El::BigFloat> columns;
+      El::View(columns, T.Matrix(), El::ALL,
+               El::IR(j0 / grid_size, j0 / grid_size + part.LocalWidth()));
+      El::Copy(part.LockedMatrix(), columns);
+    }
+}
+
 // #184 (SDPB_STREAM_P): Q = (L^{-1} B)^T (L^{-1} B) without holding L^{-1} B. The rows of
 // T_j = L_j^{-1} B_j are formed panel by panel as the bands need them (forward
 // substitution: T[r0:r1] = L[r0:r1,r0:r1]^{-1} (B[r0:r1] - L[r0:r1,0:r0] T[0:r0])), go to
@@ -308,11 +352,10 @@ void syrk_Q_streaming(
                     auto &T = L_inv_B_columns.at(block);
                     if(!T)
                       {
-                        El::DistMatrix<El::BigFloat> B_scratch; // --sparseB
                         T = std::make_unique<
                           El::DistMatrix<El::BigFloat, El::STAR, El::VR>>(
                           B.blocks.at(block).Grid());
-                        *T = sdp.free_var_block(block, B_scratch);
+                        free_var_block_columns(sdp, block, *T);
                       }
                     // L[r0:r1, 0:r1]: the factor's, or the block's local matrix
                     Multimodular_Block_Factor::Lower_Rows L_rows;
