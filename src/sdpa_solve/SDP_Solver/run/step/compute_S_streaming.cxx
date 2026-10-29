@@ -43,6 +43,20 @@ namespace Sdpb::Sdpa
     return value != nullptr && std::string(value) != "0";
   }
 
+  size_t stream_S_band_rows()
+  {
+    constexpr size_t default_rows = 1024;
+    const char *value = std::getenv("SDPB_STREAM_P_BAND_ROWS");
+    if(value == nullptr || *value == '\0')
+      return default_rows;
+    char *end = nullptr;
+    const auto rows = std::strtoull(value, &end, 10);
+    ASSERT(end != value && *end == '\0',
+           "SDPB_STREAM_P_BAND_ROWS must be a number of rows (0: no cap), got '",
+           value, "'");
+    return rows;
+  }
+
   namespace
   {
     // A contiguous range of columns [col_begin, col_end) of G_p for one local block.

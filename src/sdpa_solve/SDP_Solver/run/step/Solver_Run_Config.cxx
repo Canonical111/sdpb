@@ -293,6 +293,17 @@ namespace Sdpb::Sdpa
                  cfg.syrk_S_config.input_split_factor);
         ADD_LINE("syrk_S() output split factor: ",
                  cfg.syrk_S_config.output_split_factor);
+        if(stream_S_enabled())
+          {
+            const size_t cap = stream_S_band_rows();
+            ADD_LINE("SDPB_STREAM_P band rows per prime: ",
+                     cfg.syrk_S_config.input_window_height(), " (cap ",
+                     cap == 0 ? std::string("none")
+                     : cfg.syrk_S_config.num_nodes > 1
+                       ? std::to_string(cap) + ", not applied across nodes"
+                       : std::to_string(cap),
+                     ", SDPB_STREAM_P_BAND_ROWS)");
+          }
         --indent_level;
       }
       {
@@ -443,10 +454,10 @@ namespace Sdpb::Sdpa
     };
 
     // #184: streaming S has no trmm to balance against. Each MPI group needs bands at
-    // least as tall as its largest block (one column of G_p per band row group) and
-    // prefers them as tall as possible (fewer, longer BLAS calls). Take the smallest
-    // output split that admits such bands, then the smallest input split (= tallest
-    // bands) that fits.
+    // least as tall as its largest block (one column of G_p per band row group). Take
+    // the smallest output split that admits such bands, then the smallest input split
+    // (= tallest bands) that fits; on a single node, bands no taller than
+    // stream_S_band_rows() (see below).
     std::optional<Solver_Run_Config> streaming_result;
     if(stream_S_enabled())
       {
@@ -487,14 +498,43 @@ namespace Sdpb::Sdpa
               [&](const size_t split) { return !fits(split); });
             input_split = El::mpi::AllReduce(input_split, El::mpi::MAX,
                                              El::mpi::COMM_WORLD);
+            const auto tall_enough_here = [&](const size_t split) {
+              const auto cfg = create_syrk_cfg(split, output_split);
+              const auto &heights = cfg.input_window_height_per_group_per_prime;
+              ASSERT_EQUAL(heights.size(), group_max_dims.size());
+              for(size_t group = 0; group < heights.size(); ++group)
+                if(heights.at(group) < group_max_dims.at(group))
+                  return false;
+              return true;
+            };
+            // On a single node all bands share one CRT, so bands need not fill the
+            // budget: stop at stream_S_band_rows() rows per prime, unless a group's
+            // largest block needs taller bands. Across nodes every band is restored
+            // separately, and the tallest bands that fit stay the faster choice.
+            const size_t band_rows = stream_S_band_rows();
+            if(num_nodes == 1 && band_rows > 0)
+              {
+                const auto too_tall = [&](const size_t split) {
+                  return create_syrk_cfg(split, output_split).input_window_height()
+                         > band_rows;
+                };
+                const size_t capped_split
+                  = too_tall(max_syrk_input_split_factor)
+                      ? max_syrk_input_split_factor
+                      : partition_point_unsafe(1, max_syrk_input_split_factor + 1,
+                                               too_tall);
+                // The largest split whose bands still hold each group's largest block.
+                const size_t tallest_split
+                  = tall_enough_here(max_syrk_input_split_factor)
+                      ? max_syrk_input_split_factor
+                      : partition_point_unsafe(1, max_syrk_input_split_factor + 1,
+                                               tall_enough_here)
+                          - 1;
+                input_split = std::max(input_split,
+                                       std::min(capped_split, tallest_split));
+              }
             const auto syrk_cfg = create_syrk_cfg(input_split, output_split);
-            const auto &heights
-              = syrk_cfg.input_window_height_per_group_per_prime;
-            ASSERT_EQUAL(heights.size(), group_max_dims.size());
-            int tall_enough = 1;
-            for(size_t group = 0; group < heights.size(); ++group)
-              if(heights.at(group) < group_max_dims.at(group))
-                tall_enough = 0;
+            int tall_enough = tall_enough_here(input_split) ? 1 : 0;
             tall_enough = El::mpi::AllReduce(tall_enough, El::mpi::MIN,
                                              El::mpi::COMM_WORLD);
             if(tall_enough == 1)

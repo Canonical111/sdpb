@@ -16,6 +16,12 @@ namespace Sdpb::Sdpa
   // cover this many extra bits per factor, so a prediction that overshoots a column
   // norm by up to 2^12 keeps all the bits of the exact normalization.
   constexpr int stream_S_extra_bits = 12;
+  // On a single node, the most rows per prime of one band (the height of the syrk input
+  // window, summed over the node's MPI groups): bands share one CRT there, so taller
+  // bands only buy longer BLAS calls, and the planner stops at this height instead of
+  // filling --maxSharedMemory. SDPB_STREAM_P_BAND_ROWS overrides the default; 0 lifts
+  // the cap. See docs/Streaming_S.md.
+  size_t stream_S_band_rows();
 
   struct Compute_S_Context
   {
